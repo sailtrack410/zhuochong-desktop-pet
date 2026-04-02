@@ -1,0 +1,65 @@
+{
+  "characterId": "pixel-cat",
+  "displayName": "Pixel Cat",
+  "version": 1,
+  "frameSize": {
+    "width": 32,
+    "height": 32
+  },
+  "defaultState": "idle",
+  "chatStateFallback": "idle",
+  "states": {
+    "idle": {
+      "src": "./runtime/states/idle.gif",
+      "loop": true,
+      "durationHintMs": 1200
+    },
+    "sleep": {
+      "src": "./runtime/states/sleep.gif",
+      "loop": true,
+      "durationHintMs": 1200
+    },
+    "move": {
+      "src": "./runtime/states/move.gif",
+      "loop": true,
+      "durationHintMs": 900
+    },
+    "run": {
+      "src": "./runtime/states/run.gif",
+      "loop": true,
+      "durationHintMs": 800
+    },
+    "drag": {
+      "src": "./runtime/states/drag.gif",
+      "loop": true,
+      "durationHintMs": 1000
+    },
+    "click": {
+      "src": "./runtime/states/click.gif",
+      "loop": false,
+      "durationHintMs": 900,
+      "nextState": "idle"
+    },
+    "hurt": {
+      "src": "./runtime/states/hurt.gif",
+      "loop": false,
+      "durationHintMs": 900,
+      "nextState": "idle"
+    },
+    "hide": {
+      "src": "./runtime/states/hide.png",
+      "loop": false
+    }
+  },
+  "uiMappings": {
+    "boot": "idle",
+    "chat": "idle",
+    "replyHighlight": "click",
+    "longIdle": "sleep",
+    "dragging": "drag",
+    "reposition": "move",
+    "dash": "run",
+    "dock": "hide",
+    "error": "hurt"
+  }
+}
