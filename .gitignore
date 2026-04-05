@@ -3,6 +3,17 @@ Thumbs.db
 node_modules/
 dist/
 build/
+.turbo/
+.cache/
+.vite/
+.pnpm-store/
+coverage/
 .env
 .env.*
 *.log
+docs/
+**/data/**/*.db
+**/data/**/*.sqlite
+**/data/**/*.sqlite-*
+**/data/**/*.sqlite3
+**/data/**/*.sqlite3-*
