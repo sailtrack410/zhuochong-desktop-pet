@@ -1,0 +1,73 @@
+{
+  "name": "@zhuochong/desktop-shell",
+  "version": "0.1.0",
+  "private": true,
+  "productName": "桌宠 AI",
+  "type": "module",
+  "main": "dist/electron/main.js",
+  "scripts": {
+    "dev": "pnpm run dev:renderer",
+    "dev:renderer": "vite",
+    "dev:electron": "pnpm run build:electron && VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist/electron/main.js",
+    "dev:electron:panel": "pnpm run build:electron && ZHUOCHONG_VISIBLE_DEBUG_WINDOW=1 VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist/electron/main.js",
+    "build": "pnpm run build:renderer && pnpm run build:electron",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "start": "electron dist/electron/main.js",
+    "start:panel": "ZHUOCHONG_VISIBLE_DEBUG_WINDOW=1 electron dist/electron/main.js",
+    "package:mac": "pnpm run build && node scripts/package-mac.mjs dir",
+    "dist:mac": "pnpm run build && node scripts/package-mac.mjs dmg zip",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit"
+  },
+  "build": {
+    "appId": "com.zhuochong.desktop.pet",
+    "directories": {
+      "output": "dist/release",
+      "buildResources": "build-resources"
+    },
+    "files": [
+      "dist/electron/**/*",
+      "dist/renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../local-service/dist",
+        "to": "local-service/dist"
+      },
+      {
+        "from": "build-resources/mac/dock-icon.png",
+        "to": "icons/mac/dock-icon.png"
+      },
+      {
+        "from": "build-resources/mac/status-icon.png",
+        "to": "icons/mac/status-icon.png"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
+  },
+  "dependencies": {
+    "@zhuochong/ui-contracts": "workspace:*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.3",
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "electron-builder": "24.13.3",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
