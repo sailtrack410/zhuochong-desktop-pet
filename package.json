@@ -1,0 +1,14 @@
+{
+  "name": "zhuochong-desktop-pet",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "dev:shell": "pnpm --filter @zhuochong/desktop-shell dev",
+    "dev:shell:electron": "pnpm --filter @zhuochong/local-service build && pnpm --filter @zhuochong/desktop-shell dev:electron",
+    "dev:service": "pnpm --filter @zhuochong/local-service dev",
+    "package:mac": "pnpm --filter @zhuochong/desktop-shell package:mac",
+    "dist:mac": "pnpm --filter @zhuochong/desktop-shell dist:mac"
+  }
+}
