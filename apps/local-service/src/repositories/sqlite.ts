@@ -1,8 +1,8 @@
-import BetterSqlite3 from "better-sqlite3";
-import { dirname, resolve } from "node:path";
-import { mkdirSync } from "node:fs";
+import type { ChatSessionStatsDto } from "@zhuochong/ui-contracts";
 
-type Database = BetterSqlite3.Database;
+import BetterSqlite3 from "better-sqlite3";
+import { mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 import { createPrefixedId, nowIso } from "@zhuochong/shared";
 
@@ -27,6 +27,8 @@ import type {
   ReminderLogRepository,
   SettingsRepository,
 } from "./contracts.js";
+
+type Database = BetterSqlite3.Database;
 
 const LOCAL_SERVICE_SCHEMA_VERSION = 1;
 
@@ -355,6 +357,22 @@ const createDatabase = (databaseFilePath: string): Database => {
 class SqliteConversationRepository implements ConversationRepository {
   constructor(private readonly database: Database) {}
 
+  private getSessionById(sessionId: string): ConversationSession | null {
+    const row = this.database
+      .prepare(`
+        SELECT
+          session_id AS sessionId,
+          status,
+          started_at AS startedAt,
+          last_message_at AS lastMessageAt
+        FROM conversation_sessions
+        WHERE session_id = ?
+      `)
+      .get(sessionId) as SqliteConversationSessionRow | undefined;
+
+    return row ? mapConversationSession(row) : null;
+  }
+
   async getOrCreateActiveSession(): Promise<ConversationSession> {
     const existing = this.database
       .prepare(`
@@ -432,7 +450,46 @@ class SqliteConversationRepository implements ConversationRepository {
     limit: number;
     beforeMessageId?: string;
   }): Promise<ConversationMessage[]> {
-    const rows = this.database
+    if (!params.beforeMessageId) {
+      return this.database
+        .prepare(`
+          SELECT
+            message_id AS messageId,
+            session_id AS sessionId,
+            role,
+            source,
+            text,
+            created_at AS createdAt,
+            related_reminder_id AS relatedReminderId
+          FROM conversation_messages
+          WHERE session_id = ?
+          ORDER BY created_at DESC
+          LIMIT ?
+        `)
+        .all(params.sessionId, params.limit)
+        .reverse()
+        .map((row) => mapConversationMessage(row as SqliteConversationMessageRow));
+    }
+
+    const beforeRow = this.database
+      .prepare(`
+        SELECT created_at AS createdAt, message_id AS messageId
+        FROM conversation_messages
+        WHERE session_id = ? AND message_id = ?
+        LIMIT 1
+      `)
+      .get(params.sessionId, params.beforeMessageId) as
+      | {
+          createdAt: string;
+          messageId: string;
+        }
+      | undefined;
+
+    if (!beforeRow) {
+      return [];
+    }
+
+    return this.database
       .prepare(`
         SELECT
           message_id AS messageId,
@@ -444,25 +501,22 @@ class SqliteConversationRepository implements ConversationRepository {
           related_reminder_id AS relatedReminderId
         FROM conversation_messages
         WHERE session_id = ?
-        ORDER BY created_at ASC
+          AND (
+            created_at < ?
+            OR (created_at = ? AND message_id < ?)
+          )
+        ORDER BY created_at DESC, message_id DESC
+        LIMIT ?
       `)
-      .all(params.sessionId) as SqliteConversationMessageRow[];
-
-    if (!params.beforeMessageId) {
-      return rows.slice(-params.limit).map(mapConversationMessage);
-    }
-
-    const beforeIndex = rows.findIndex(
-      (message) => message.messageId === params.beforeMessageId,
-    );
-
-    if (beforeIndex <= 0) {
-      return [];
-    }
-
-    return rows
-      .slice(Math.max(0, beforeIndex - params.limit), beforeIndex)
-      .map(mapConversationMessage);
+      .all(
+        params.sessionId,
+        beforeRow.createdAt,
+        beforeRow.createdAt,
+        beforeRow.messageId,
+        params.limit,
+      )
+      .reverse()
+      .map((row) => mapConversationMessage(row as SqliteConversationMessageRow));
   }
 
   async listRecentMessages(params: {
@@ -538,6 +592,43 @@ class SqliteConversationRepository implements ConversationRepository {
     return session;
   }
 
+  async setActiveSession(sessionId: string): Promise<ConversationSession | null> {
+    const targetSession = this.getSessionById(sessionId);
+    if (!targetSession) {
+      return null;
+    }
+
+    const switchToSession = this.database.transaction(
+      (nextSessionId: string): ConversationSession => {
+        this.database
+          .prepare(`
+            UPDATE conversation_sessions
+            SET status = 'archived'
+            WHERE status = 'active'
+              AND session_id != ?
+          `)
+          .run(nextSessionId);
+
+        this.database
+          .prepare(`
+            UPDATE conversation_sessions
+            SET status = 'active'
+            WHERE session_id = ?
+          `)
+          .run(nextSessionId);
+
+        const nextSession = this.getSessionById(nextSessionId);
+        if (!nextSession) {
+          throw new Error("切换活动会话后读取失败。");
+        }
+
+        return nextSession;
+      },
+    );
+
+    return switchToSession(sessionId);
+  }
+
   async listSessions(params: { limit: number }): Promise<ConversationSession[]> {
     const rows = this.database
       .prepare(`
@@ -565,7 +656,7 @@ class SqliteConversationRepository implements ConversationRepository {
       .run(sessionId);
   }
 
-  async getSessionStats(sessionId: string): Promise<{ messageCount: number; userTokens: number; assistantTokens: number }> {
+  async getSessionStats(sessionId: string): Promise<ChatSessionStatsDto> {
     const messageCount = this.database
       .prepare(`
         SELECT COUNT(*) as count

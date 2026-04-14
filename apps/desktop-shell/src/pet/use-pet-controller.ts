@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 import type {
+  CompanionEventRecordRequest,
   PetMoveDistance,
   PetBusinessState,
   PetMood,
@@ -35,11 +36,64 @@ type PetViewState = {
 };
 
 type PetMetric = {
-  key: "satiety" | "energy" | "affinity";
+  key: "satiety" | "energy" | "affinity" | "health";
   label: string;
   value: number;
-  tone: "meal" | "energy" | "heart";
+  tone: "meal" | "energy" | "heart" | "health";
   hint: string;
+};
+
+type PetResource = {
+  key: "snackToken" | "playToken";
+  label: string;
+  value: number;
+  hint: string;
+};
+
+type PetEventLog = {
+  eventId: string;
+  title: string;
+  description: string;
+  createdAt: string;
+  tone: "positive" | "neutral" | "warning";
+};
+
+type PetActionAvailability = {
+  canFeed: boolean;
+  feedReason: string;
+  canPlay: boolean;
+  playReason: string;
+  canRest: boolean;
+  restReason: string;
+};
+
+type ChatAffinityAssessment = {
+  delta: number;
+  reason: string;
+};
+
+const assessChatAffinity = (text: string): ChatAffinityAssessment => {
+  const normalized = text.trim();
+  if (!normalized) {
+    return { delta: 0, reason: "空消息不会影响关系。" };
+  }
+
+  if (/(滚|烦|闭嘴|别说|别烦我|讨厌|走开)/.test(normalized)) {
+    return { delta: -1, reason: "刚才的话让它有点受伤。" };
+  }
+
+  if (/(谢谢|辛苦了|陪我|你好|早安|晚安|抱抱|喜欢你|可爱)/.test(normalized)) {
+    return { delta: 1, reason: "刚才的话让它更愿意亲近你。" };
+  }
+
+  return { delta: 0, reason: "这次聊天没有直接改变关系。" };
+};
+
+
+type AffinityAdjustmentResult = {
+  applied: boolean;
+  delta: number;
+  reason: string;
 };
 
 type AmbientMotionProfile = {
@@ -79,6 +133,61 @@ const distanceExceeded = (
 
 const clampMetric = (value: number) =>
   Math.min(100, Math.max(0, Math.round(value)));
+
+const createPrefixedId = (prefix: string) => {
+  const entropy = Math.random().toString(36).slice(2, 10);
+  const timestamp = Date.now().toString(36);
+  return `${prefix}_${timestamp}_${entropy}`;
+};
+
+const nowIso = () => new Date().toISOString();
+
+const affinityCooldownMs = 60 * 60_000;
+
+const getAutoEventDelayMs = (level: ProactivityLevel) => {
+  if (level === "high") {
+    return 12 * 60_000;
+  }
+
+  if (level === "low") {
+    return 45 * 60_000;
+  }
+
+  return 24 * 60_000;
+};
+
+
+const applyAffinityDelta = (
+  currentAffinity: number,
+  delta: number,
+  lastAffinityChangedAt: string | null,
+): AffinityAdjustmentResult => {
+  if (delta === 0) {
+    return {
+      applied: false,
+      delta: 0,
+      reason: "本次事件不会影响好感。",
+    };
+  }
+
+  const nowMs = Date.now();
+  const lastChangedMs = lastAffinityChangedAt ? Date.parse(lastAffinityChangedAt) : 0;
+  if (lastChangedMs && Number.isFinite(lastChangedMs) && nowMs - lastChangedMs < affinityCooldownMs) {
+    const remainMinutes = Math.max(1, Math.ceil((affinityCooldownMs - (nowMs - lastChangedMs)) / 60_000));
+    return {
+      applied: false,
+      delta: 0,
+      reason: `好感冷却中，还需约 ${remainMinutes} 分钟。`,
+    };
+  }
+
+  const boundedDelta = delta > 0 ? Math.min(delta, 2) : Math.max(delta, -2);
+  return {
+    applied: true,
+    delta: boundedDelta,
+    reason: boundedDelta > 0 ? `好感上升 ${boundedDelta}。` : `好感下降 ${Math.abs(boundedDelta)}。`,
+  };
+};
 
 export const getAmbientMotionProfile = (
   settings: PetRuntimeBehaviorSettings,
@@ -208,7 +317,16 @@ const petViewStates = {
     mood: "happy",
     trigger: "system",
   },
-} satisfies Record<"idle" | "sleep" | "click" | "drag" | "move" | "run", PetViewState>;
+  hurt: {
+    businessState: "reacting",
+    visualState: "hurt",
+    mood: "annoyed",
+    trigger: "system",
+  },
+} satisfies Record<
+  "idle" | "sleep" | "click" | "drag" | "move" | "run" | "hurt",
+  PetViewState
+>;
 
 const normalizeRestoredVisualState = (
   visualState: PetVisualState,
@@ -273,6 +391,55 @@ const describeAffinity = (value: number) => {
   return "关系正在慢慢升温。";
 };
 
+const describeHealth = (value: number) => {
+  if (value < 35) {
+    return "需要好好照顾一下。";
+  }
+
+  if (value > 82) {
+    return "状态很好，精神饱满。";
+  }
+
+  return "整体健康状况稳定。";
+};
+
+const createPetEventLog = (
+  title: string,
+  description: string,
+  tone: PetEventLog["tone"],
+): PetEventLog => ({
+  eventId: createPrefixedId("petevent"),
+  title,
+  description,
+  createdAt: nowIso(),
+  tone,
+});
+
+const getAffinityStage = (value: number) => {
+  if (value >= 80) {
+    return "亲密无间";
+  }
+
+  if (value >= 60) {
+    return "关系很好";
+  }
+
+  if (value >= 40) {
+    return "逐渐熟悉";
+  }
+
+  if (value >= 20) {
+    return "刚建立联系";
+  }
+
+  return "还在观察你";
+};
+
+const resolveAffinityStageAfterAdjustment = (
+  currentAffinity: number,
+  result: AffinityAdjustmentResult,
+) => getAffinityStage(clampMetric(currentAffinity + (result.applied ? result.delta : 0)));
+
 export const usePetController = (
   behaviorSettings: PetRuntimeBehaviorSettings = defaultPetRuntimeBehaviorSettings,
 ) => {
@@ -295,7 +462,12 @@ export const usePetController = (
   );
   const [satiety, setSatiety] = useState(76);
   const [energy, setEnergy] = useState(68);
-  const [affinity, setAffinity] = useState(64);
+  const [health, setHealth] = useState(88);
+  const [affinity, setAffinity] = useState(20);
+  const [snackToken, setSnackToken] = useState(1);
+  const [playToken, setPlayToken] = useState(1);
+  const [eventLogs, setEventLogs] = useState<PetEventLog[]>([]);
+  const [lastAffinityChangedAt, setLastAffinityChangedAt] = useState<string | null>(null);
 
   const dragStateRef = useRef<DragState | null>(null);
   const idleTimerRef = useRef<number | null>(null);
@@ -308,6 +480,7 @@ export const usePetController = (
   );
   const suppressNextClickRef = useRef(false);
   const ambientMoveInFlightRef = useRef(false);
+  const randomEventTimerRef = useRef<number | null>(null);
 
   const currentAsset = useMemo(() => {
     if (visualState === "sleep" && isSleepSettled) {
@@ -483,7 +656,7 @@ export const usePetController = (
       clearTransitionTimer();
       clearBootstrapRetryTimer();
     };
-  }, []);
+  }, [scheduleSleep]);
 
   useEffect(() => {
     if (visualState !== "sleep") {
@@ -532,14 +705,77 @@ export const usePetController = (
         hint: describeEnergy(energy),
       },
       {
+        key: "health",
+        label: "健康度",
+        value: health,
+        tone: "health",
+        hint: describeHealth(health),
+      },
+      {
         key: "affinity",
-        label: "亲密度",
+        label: "好感度",
         value: affinity,
         tone: "heart",
         hint: describeAffinity(affinity),
       },
     ],
-    [affinity, energy, satiety],
+    [affinity, energy, health, satiety],
+  );
+
+  const resources = useMemo<PetResource[]>(
+    () => [
+      {
+        key: "snackToken",
+        label: "点心券",
+        value: snackToken,
+        hint: snackToken > 0 ? "可以拿来喂它。" : "需要靠随机事件获得。",
+      },
+      {
+        key: "playToken",
+        label: "玩耍券",
+        value: playToken,
+        hint: playToken > 0 ? "可以拿来陪它玩。" : "需要靠随机事件获得。",
+      },
+    ],
+    [playToken, snackToken],
+  );
+
+  const affinityStage = useMemo(() => getAffinityStage(affinity), [affinity]);
+
+  const affinityCooldownRemainingMs = useMemo(() => {
+    if (!lastAffinityChangedAt) {
+      return 0;
+    }
+
+    const lastChangedMs = Date.parse(lastAffinityChangedAt);
+    if (!Number.isFinite(lastChangedMs)) {
+      return 0;
+    }
+
+    return Math.max(0, affinityCooldownMs - (Date.now() - lastChangedMs));
+  }, [lastAffinityChangedAt, eventLogs.length]);
+
+  const actionAvailability = useMemo<PetActionAvailability>(
+    () => ({
+      canFeed: snackToken > 0,
+      feedReason:
+        snackToken > 0
+          ? "有点心券，可以喂食。"
+          : "缺少点心券，先等随机事件掉落。",
+      canPlay: playToken > 0 && energy >= 25,
+      playReason:
+        playToken <= 0
+          ? "缺少玩耍券，先等随机事件掉落。"
+          : energy < 25
+            ? "精力太低了，先让它休息一下。"
+            : "可以玩耍，会消耗玩耍券和精力。",
+      canRest: energy < 96,
+      restReason:
+        energy < 96
+          ? "休息可以恢复精力和健康。"
+          : "它现在精神很好，暂时不用强制休息。",
+    }),
+    [energy, playToken, snackToken],
   );
 
   const dragHint = useMemo(
@@ -554,31 +790,244 @@ export const usePetController = (
     [isDragging, serviceLevel],
   );
 
+  const appendEventLog = (event: PetEventLog) => {
+    setEventLogs((current) => [event, ...current].slice(0, 6));
+  };
+
+  const persistCompanionEvent = useCallback(
+    (request: CompanionEventRecordRequest) => {
+      void desktopLocalService.recordCompanionEvent(request).catch(() => {
+        // Companion memory sync is best-effort.
+      });
+    },
+    [],
+  );
+
+  const applyAffinityChange = useCallback(
+    (delta: number, reason: string) => {
+      const result = applyAffinityDelta(affinity, delta, lastAffinityChangedAt);
+      if (!result.applied) {
+        return result;
+      }
+
+      const changedAt = nowIso();
+      const nextAffinity = clampMetric(affinity + result.delta);
+      setAffinity(nextAffinity);
+      setLastAffinityChangedAt(changedAt);
+      appendEventLog(
+        createPetEventLog(
+          result.delta > 0 ? "关系变化" : "关系波动",
+          `${reason} ${result.reason}`,
+          result.delta > 0 ? "positive" : "warning",
+        ),
+      );
+      return result;
+    },
+    [affinity, lastAffinityChangedAt],
+  );
+
+  const triggerRandomEvent = useCallback(() => {
+    const eventPool: Array<() => { event: PetEventLog; affinityDelta: number }> = [
+      () => {
+        setSnackToken((current) => current + 1);
+        return {
+          event: createPetEventLog(
+            "捡到点心券",
+            "它在桌边晃来晃去，竟然替你翻出了一张点心券。",
+            "positive",
+          ),
+          affinityDelta: 1,
+        };
+      },
+      () => {
+        setPlayToken((current) => current + 1);
+        setEnergy((current) => clampMetric(current + 6));
+        return {
+          event: createPetEventLog(
+            "拿到玩耍券",
+            "它自己兴奋了一阵，顺手攒出一张玩耍券。",
+            "positive",
+          ),
+          affinityDelta: 1,
+        };
+      },
+      () => {
+        setSatiety((current) => clampMetric(current - 8));
+        return {
+          event: createPetEventLog(
+            "有点饿了",
+            "它悄悄提醒你：今天还没认真照顾它。",
+            "warning",
+          ),
+          affinityDelta: -1,
+        };
+      },
+      () => {
+        setHealth((current) => clampMetric(current - 6));
+        return {
+          event: createPetEventLog(
+            "状态波动",
+            "它今天精神不太稳，需要你多关照一下。",
+            "warning",
+          ),
+          affinityDelta: -2,
+        };
+      },
+      () => ({
+        event: createPetEventLog(
+          "情绪平稳",
+          "它今天没有特别的变化，只是安静陪着你。",
+          "neutral",
+        ),
+        affinityDelta: 0,
+      }),
+    ];
+
+    const result = eventPool[Math.floor(Math.random() * eventPool.length)]!();
+    appendEventLog(result.event);
+    const affinityResult = applyAffinityChange(
+      result.affinityDelta,
+      result.event.description,
+    );
+    persistCompanionEvent({
+      type: "random_event",
+      title: result.event.title,
+      description: result.event.description,
+      relationStage: resolveAffinityStageAfterAdjustment(affinity, affinityResult),
+      affinityDelta: affinityResult.applied ? affinityResult.delta : 0,
+      occurredAt: result.event.createdAt,
+    });
+    return result.event;
+  }, [affinity, applyAffinityChange, persistCompanionEvent]);
+
+  const handleChatAffinity = useCallback(
+    (text: string) => {
+      const assessment = assessChatAffinity(text);
+      if (assessment.delta === 0) {
+        return assessment;
+      }
+
+      const result = applyAffinityChange(assessment.delta, assessment.reason);
+      persistCompanionEvent({
+        type: "chat_affinity",
+        title: result.delta > 0 ? "聊天升温" : "聊天波动",
+        description: assessment.reason,
+        relationStage: resolveAffinityStageAfterAdjustment(affinity, result),
+        affinityDelta: result.applied ? result.delta : 0,
+      });
+      return {
+        delta: result.delta,
+        reason: result.reason,
+      };
+    },
+    [affinity, applyAffinityChange, persistCompanionEvent],
+  );
+
   const feedPet = () => {
+    if (!actionAvailability.canFeed) {
+      const failedEvent = createPetEventLog(
+        "喂食失败",
+        actionAvailability.feedReason,
+        "warning",
+      );
+      appendEventLog(failedEvent);
+      playTransientState(petViewStates.hurt, petViewStates.idle, 720);
+      return failedEvent;
+    }
+
+    setSnackToken((current) => Math.max(0, current - 1));
     setSatiety((current) => clampMetric(current + 16));
     setEnergy((current) => clampMetric(current + 4));
-    setAffinity((current) => clampMetric(current + 3));
+    setHealth((current) => clampMetric(current + 3));
     playTransientState(petViewStates.click, petViewStates.idle, 780);
     scheduleSleep();
+    const successEvent = createPetEventLog(
+      "喂食成功",
+      "它吃得很满足，但关系要慢慢培养。",
+      "positive",
+    );
+    appendEventLog(successEvent);
+    const affinityResult = applyAffinityChange(1, "你认真喂了它。");
+    persistCompanionEvent({
+      type: "care_action",
+      title: successEvent.title,
+      description: successEvent.description,
+      relationStage: resolveAffinityStageAfterAdjustment(affinity, affinityResult),
+      affinityDelta: affinityResult.applied ? affinityResult.delta : 0,
+      occurredAt: successEvent.createdAt,
+    });
+    return successEvent;
   };
 
   const playWithPet = () => {
+    if (!actionAvailability.canPlay) {
+      const failedEvent = createPetEventLog(
+        "玩耍失败",
+        actionAvailability.playReason,
+        "warning",
+      );
+      appendEventLog(failedEvent);
+      playTransientState(petViewStates.hurt, petViewStates.idle, 720);
+      return failedEvent;
+    }
+
+    setPlayToken((current) => Math.max(0, current - 1));
     setSatiety((current) => clampMetric(current - 4));
     setEnergy((current) => clampMetric(current - 10));
-    setAffinity((current) => clampMetric(current + 10));
+    setHealth((current) => clampMetric(current + 2));
     playTransientState(petViewStates.move, petViewStates.idle, 720);
     scheduleSleep();
+    const successEvent = createPetEventLog(
+      "玩耍成功",
+      "它玩得很开心，但真正亲近需要长期积累。",
+      "positive",
+    );
+    appendEventLog(successEvent);
+    const affinityResult = applyAffinityChange(2, "你陪它玩了一会儿。");
+    persistCompanionEvent({
+      type: "care_action",
+      title: successEvent.title,
+      description: successEvent.description,
+      relationStage: resolveAffinityStageAfterAdjustment(affinity, affinityResult),
+      affinityDelta: affinityResult.applied ? affinityResult.delta : 0,
+      occurredAt: successEvent.createdAt,
+    });
+    return successEvent;
   };
 
   const restPet = () => {
+    if (!actionAvailability.canRest) {
+      const skippedEvent = createPetEventLog(
+        "暂时不用休息",
+        actionAvailability.restReason,
+        "neutral",
+      );
+      appendEventLog(skippedEvent);
+      return skippedEvent;
+    }
+
     clearTransitionTimer();
     setSatiety((current) => clampMetric(current - 2));
     setEnergy((current) => clampMetric(current + 18));
-    setAffinity((current) => clampMetric(current + 2));
+    setHealth((current) => clampMetric(current + 8));
     applyPetViewState(petViewStates.sleep);
     scheduleSleep();
+    const successEvent = createPetEventLog(
+      "休息恢复",
+      "它安静睡了一会儿，精神和健康都恢复了一些。",
+      "neutral",
+    );
+    appendEventLog(successEvent);
+    persistCompanionEvent({
+      type: "care_action",
+      title: successEvent.title,
+      description: successEvent.description,
+      relationStage: affinityStage,
+      affinityDelta: 0,
+      occurredAt: successEvent.createdAt,
+    });
+    return successEvent;
   };
-
   const handlePointerDown = (event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0) {
       return;
@@ -678,6 +1127,29 @@ export const usePetController = (
     return true;
   };
 
+  useEffect(() => {
+    if (randomEventTimerRef.current !== null) {
+      window.clearTimeout(randomEventTimerRef.current);
+      randomEventTimerRef.current = null;
+    }
+
+    if (visualState === "sleep" || isDragging) {
+      return;
+    }
+
+    randomEventTimerRef.current = window.setTimeout(() => {
+      randomEventTimerRef.current = null;
+      triggerRandomEvent();
+    }, getAutoEventDelayMs(behaviorSettings.proactivityLevel));
+
+    return () => {
+      if (randomEventTimerRef.current !== null) {
+        window.clearTimeout(randomEventTimerRef.current);
+        randomEventTimerRef.current = null;
+      }
+    };
+  }, [behaviorSettings.proactivityLevel, isDragging, triggerRandomEvent, visualState]);
+
   const wanderRandomly = useCallback(async () => {
     if (isDraggingRef.current || ambientMoveInFlightRef.current) {
       return false;
@@ -721,10 +1193,13 @@ export const usePetController = (
     });
 
     try {
-      await window.zhuochong?.petWindow.animateTo({
-        x: currentPosition.x + horizontalOffset,
-        y: currentPosition.y + verticalOffset,
-      }, durationMs);
+      await window.zhuochong?.petWindow.animateTo(
+        {
+          x: currentPosition.x + horizontalOffset,
+          y: currentPosition.y + verticalOffset,
+        },
+        durationMs,
+      );
       return true;
     } catch {
       return false;
@@ -739,26 +1214,33 @@ export const usePetController = (
   }, [ambientMotionProfile]);
 
   return {
+    actionAvailability,
+    affinityCooldownRemainingMs,
+    affinityStage,
     consumePetClick,
     currentAsset,
     dragHint,
+    eventLogs,
+    facingDirection,
     feedPet,
     handlePointerCancel,
     handlePointerDown,
     handlePointerMove,
     handlePointerUp: finishInteraction,
+    handleChatAffinity,
     isDragging,
     metrics,
     petName,
     pixelScale,
     playWithPet,
+    resources,
     restPet,
     runtimeVersion,
     serviceLabel,
     serviceLevel,
     statusText,
+    triggerRandomEvent,
     visualState,
-    facingDirection,
     wanderRandomly,
   };
 };

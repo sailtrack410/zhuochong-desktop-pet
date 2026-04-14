@@ -195,26 +195,138 @@ const getCompanionQuietThresholdMs = (level: ProactivityLevel): number => {
   return 10 * 60_000;
 };
 
-const createCompanionText = (now: Date): string => {
-  const hour = now.getHours();
 
-  if (hour < 12) {
-    return "上午也要记得喝水，伸个懒腰再继续。";
-  }
+const createCompanionText = (params: {
+  now: Date;
+  lastMessageAgeMs: number;
+  foregroundAppName?: string | null;
+  pendingReminderCount?: number;
+}): string => {
+  const hour = params.now.getHours();
+  const quietMinutes = Math.max(1, Math.round(params.lastMessageAgeMs / 60_000));
+  const appName = params.foregroundAppName?.trim();
+  const pendingHint =
+    params.pendingReminderCount && params.pendingReminderCount > 0
+      ? `还有 ${params.pendingReminderCount} 条待办别忘了。`
+      : null;
 
-  if (hour < 18) {
-    return "下午工作久了，起来活动两分钟吧。";
-  }
+  const morningLines = [
+    "早上先慢一点也没关系，喝口水再继续。",
+    "新的一段开始了，我先陪你热热身。",
+    "上午别一直闷头忙，记得给自己一点缓冲。",
+    pendingHint ? `早上好，${pendingHint}` : "今天也一起稳稳推进。",
+  ];
+  const afternoonLines = [
+    "下午最容易越忙越累，起来活动两分钟吧。",
+    "忙到现在了，眨眨眼也算是在照顾自己。",
+    appName ? `${appName} 开着有一阵子了，歇一下再冲。` : "下午这会儿最适合短暂放松一下。",
+    pendingHint ? `下午别只顾赶进度，${pendingHint}` : "如果肩膀已经紧了，就顺手伸个懒腰。",
+  ];
+  const eveningLines = [
+    "今天已经很努力了，收尾前也别忘了放松眼睛。",
+    "晚上如果还要继续，我会提醒你别太撑。",
+    appName ? `${appName} 到现在还开着，记得照顾下自己。` : "夜里忙事情的时候，也要给自己留点余地。",
+    pendingHint ? `今晚还有事的话，${pendingHint}` : "收尾前先呼一口气，会更轻松一点。",
+  ];
+  const longQuietLines = [
+    "我安静陪了你好一阵子啦，要不要和我说句话？",
+    `已经埋头 ${quietMinutes} 分钟了，休息一下也不会耽误你。`,
+    appName ? `${appName} 挺久了，我来提醒你活动一下。` : `你已经专心 ${quietMinutes} 分钟了，换口气吧。`,
+  ];
 
-  return "今天辛苦了，收个尾前记得放松一下眼睛。";
+  const pool = quietMinutes >= 90
+    ? longQuietLines
+    : hour < 12
+      ? morningLines
+      : hour < 18
+        ? afternoonLines
+        : eveningLines;
+
+  return pool[Math.floor(Math.random() * pool.length)]!;
 };
 
-const createIdleText = (idleMinutes: number): string => {
-  if (idleMinutes >= 150) {
-    return "好久没互动啦，我还在这儿陪着你。";
+const createIdleText = (params: {
+  idleMinutes: number;
+  foregroundAppName?: string | null;
+  pendingReminderCount?: number;
+}): string => {
+  const appName = params.foregroundAppName?.trim();
+  const pendingHint =
+    params.pendingReminderCount && params.pendingReminderCount > 0
+      ? `还有 ${params.pendingReminderCount} 条待办在等你。`
+      : null;
+
+  const longIdleLines = [
+    "好久没互动啦，我还在这儿陪着你。",
+    "你安静了挺久，我就轻轻冒个泡看看你。",
+    pendingHint ? `你已经空下来一阵子了，${pendingHint}` : "如果是在发呆，也算是在给自己留白。",
+  ];
+
+  const busyIdleLines = [
+    "你已经忙了一阵子，要不要喝口水休息下？",
+    appName ? `${appName} 开着挺久了，起来活动一下吧。` : "专注久了也会累，我提醒你松一松。",
+    pendingHint ? `别只顾着忙，${pendingHint}` : "先活动两分钟，回来会更顺。",
+  ];
+
+  const pool = params.idleMinutes >= 150 ? longIdleLines : busyIdleLines;
+  return pool[Math.floor(Math.random() * pool.length)]!;
+};
+
+const createBatteryText = (params: {
+  percent: number;
+  foregroundAppName?: string | null;
+}): string => {
+  const appName = params.foregroundAppName?.trim();
+  const criticalLines = [
+    `电量只剩 ${params.percent}% 了，先接上电源比较安心。`,
+    `只剩 ${params.percent}% 电量啦，我有点担心你会突然断电。`,
+    appName
+      ? `${appName} 还开着，电量却只剩 ${params.percent}% 了，先充电吧。`
+      : `现在只有 ${params.percent}% 电量，最好先补电。`,
+  ];
+  const warningLines = [
+    `电量剩下 ${params.percent}% 了，记得找机会充电。`,
+    `我帮你盯了一眼，现在电量 ${params.percent}% 左右。`,
+    appName
+      ? `${appName} 还在前台，电量也降到 ${params.percent}% 了。`
+      : `电量已经到 ${params.percent}% 了，别忘了电源。`,
+  ];
+
+  const pool = params.percent <= 12 ? criticalLines : warningLines;
+  return pool[Math.floor(Math.random() * pool.length)]!;
+};
+
+const detectForegroundAppName = async (): Promise<string | null> => {
+  if (process.platform !== "darwin") {
+    return null;
   }
 
-  return "你已经忙了一阵子，要不要喝口水休息下？";
+  const script = [
+    'tell application "System Events"',
+    'set frontProc to first process whose frontmost is true',
+    'return name of frontProc',
+    'end tell',
+  ].join("\n");
+
+  try {
+    const output = await runCommand("osascript", ["-e", script], 1_200);
+    const name = output.trim();
+    return name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+};
+
+const countPendingManualReminders = async (
+  runtime: LocalServiceRuntime,
+): Promise<number> => {
+  const records = await runtime.repositories.reminderLogRepository.listRecent({
+    limit: 50,
+  });
+
+  return records.filter(
+    (record) => record.source === "manual" && record.status === "pending",
+  ).length;
 };
 
 const detectBatteryState = async (): Promise<{
@@ -246,6 +358,7 @@ const detectBatteryState = async (): Promise<{
     isCharging,
   };
 };
+
 
 const detectFrontmostFullscreen = async (): Promise<DetectionResult> => {
   if (process.platform !== "darwin") {
@@ -363,6 +476,12 @@ const buildCandidates = async (params: {
       sessionId: params.session.sessionId,
       limit: 1,
     });
+  const [foregroundAppName, pendingReminderCount] = await Promise.all([
+    params.settings.capabilities.foregroundAppEnabled
+      ? detectForegroundAppName()
+      : Promise.resolve(null),
+    countPendingManualReminders(params.runtime),
+  ]);
 
   if (
     latestMessage.length === 0 &&
@@ -372,7 +491,10 @@ const buildCandidates = async (params: {
       source: "time",
       category: "companion",
       priority: "low",
-      text: "我已经在桌面待命啦，需要我就戳我一下。",
+      text:
+        pendingReminderCount > 0
+          ? `我已经在桌面待命啦，顺便提醒你还有 ${pendingReminderCount} 条待办。`
+          : "我已经在桌面待命啦，需要我就戳我一下。",
     });
   }
 
@@ -383,7 +505,10 @@ const buildCandidates = async (params: {
         source: "battery",
         category: "task",
         priority: batteryState.percent <= 12 ? "high" : "medium",
-        text: `电量只剩 ${batteryState.percent}% 了，记得接上电源。`,
+        text: createBatteryText({
+          percent: batteryState.percent,
+          foregroundAppName,
+        }),
       });
     }
   } catch {
@@ -397,7 +522,11 @@ const buildCandidates = async (params: {
         source: "idle",
         category: "status",
         priority: "medium",
-        text: createIdleText(Math.round(lastMessageAgeMs / 60_000)),
+        text: createIdleText({
+          idleMinutes: Math.round(lastMessageAgeMs / 60_000),
+          foregroundAppName,
+          pendingReminderCount,
+        }),
       });
     }
   }
@@ -414,7 +543,12 @@ const buildCandidates = async (params: {
       source: "time",
       category: "companion",
       priority: "low",
-      text: createCompanionText(params.now),
+      text: createCompanionText({
+        now: params.now,
+        lastMessageAgeMs,
+        foregroundAppName,
+        pendingReminderCount,
+      }),
     });
   }
 

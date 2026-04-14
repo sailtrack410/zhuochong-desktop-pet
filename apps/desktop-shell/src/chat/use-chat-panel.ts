@@ -1,18 +1,28 @@
-import { startTransition, useEffect, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 
 import type {
   ChatMessageDto,
   ChatSessionDto,
 } from "@zhuochong/ui-contracts";
 
-import { desktopLocalService } from "../services/local-service.js";
+import { formatSessionId, desktopLocalService } from "../services/local-service.js";
 import { matchLocalSkill, runLocalSkill } from "./local-skills.js";
 
 const syncIntervalMs = 4_000;
 const historyLimit = 24;
+const sessionListLimit = 20;
 const initialComposerMessage = "Cmd + Enter 发送到当前会话。";
 
 type StreamingPhase = "idle" | "waiting" | "streaming";
+
+type SessionViewPayload = {
+  session: ChatSessionDto;
+  sessions: ChatSessionDto[];
+  history: {
+    messages: ChatMessageDto[];
+    hasMore: boolean;
+  };
+};
 
 export const quickPromptPresets = [
   "今天先给我一个简短问候",
@@ -24,6 +34,10 @@ const getErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : "聊天面板暂时不可用。";
 
 const getLocalSkillPendingText = (skill: ReturnType<typeof matchLocalSkill>) => {
+  if (skill?.skillId === "desktop_action") {
+    return "消息已送出，正在执行桌面动作。";
+  }
+
   if (skill?.skillId === "manual_reminder") {
     return "消息已送出，正在设置本地提醒。";
   }
@@ -44,6 +58,10 @@ const getLocalSkillPendingText = (skill: ReturnType<typeof matchLocalSkill>) => 
 };
 
 const getLocalSkillSentText = (skill: ReturnType<typeof matchLocalSkill>) => {
+  if (skill?.skillId === "desktop_action") {
+    return "已发送，正在执行桌面动作。";
+  }
+
   if (skill?.skillId === "manual_reminder") {
     return "已发送，正在设置本地提醒。";
   }
@@ -68,7 +86,7 @@ const formatStatusText = (
   messages: ChatMessageDto[],
 ): string => {
   if (messages.length === 0) {
-    return `会话 ${session.sessionId.slice(0, 8)} 已创建，可以开始第一句。`;
+    return `会话 ${formatSessionId(session.sessionId)} 已创建，可以开始第一句。`;
   }
 
   return `已同步 ${messages.length} 条消息，本地会话持续保存在 local-service。`;
@@ -93,6 +111,48 @@ const mergeMessages = (
   return next;
 };
 
+const prependMessages = (
+  current: ChatMessageDto[],
+  older: ChatMessageDto[],
+) => {
+  if (older.length === 0) {
+    return current;
+  }
+
+  const seen = new Set(current.map((message) => message.messageId));
+  const nextOlder = older.filter((message) => !seen.has(message.messageId));
+
+  return [...nextOlder, ...current];
+};
+
+const mergeSessions = (
+  current: ChatSessionDto[],
+  incoming: ChatSessionDto[],
+) => {
+  const sessionMap = new Map(current.map((session) => [session.sessionId, session]));
+
+  for (const session of incoming) {
+    sessionMap.set(session.sessionId, session);
+  }
+
+  return [...sessionMap.values()]
+    .sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt))
+    .slice(0, sessionListLimit);
+};
+
+const updateSessionList = (
+  current: ChatSessionDto[],
+  incoming: ChatSessionDto,
+) => {
+  const normalizedCurrent = current.map((session) =>
+    session.sessionId !== incoming.sessionId && session.status === "active"
+      ? { ...session, status: "archived" as const }
+      : session,
+  );
+
+  return mergeSessions(normalizedCurrent, [incoming]);
+};
+
 const waitForNextPaint = () =>
   new Promise<void>((resolve) => {
     window.requestAnimationFrame(() => {
@@ -100,72 +160,221 @@ const waitForNextPaint = () =>
     });
   });
 
+const areSessionsEqual = (
+  left: ChatSessionDto[],
+  right: ChatSessionDto[],
+): boolean => {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((session, index) => {
+    const candidate = right[index];
+    return (
+      candidate !== undefined &&
+      session.sessionId === candidate.sessionId &&
+      session.status === candidate.status &&
+      session.startedAt === candidate.startedAt &&
+      session.lastMessageAt === candidate.lastMessageAt
+    );
+  });
+};
+
+const areMessagesEqual = (
+  left: ChatMessageDto[],
+  right: ChatMessageDto[],
+): boolean => {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((message, index) => {
+    const candidate = right[index];
+    return (
+      candidate !== undefined &&
+      message.messageId === candidate.messageId &&
+      message.sessionId === candidate.sessionId &&
+      message.role === candidate.role &&
+      message.source === candidate.source &&
+      message.text === candidate.text &&
+      message.createdAt === candidate.createdAt &&
+      message.relatedReminderId === candidate.relatedReminderId
+    );
+  });
+};
+
 export const useChatPanel = () => {
   const [activeSession, setActiveSession] = useState<ChatSessionDto | null>(null);
+  const [sessions, setSessions] = useState<ChatSessionDto[]>([]);
   const [messages, setMessages] = useState<ChatMessageDto[]>([]);
   const [draft, setDraft] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSending, setIsSending] = useState(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
+  const [switchingSessionId, setSwitchingSessionId] = useState<string | null>(null);
   const [composerMessage, setComposerMessage] = useState(initialComposerMessage);
-  // 仅用于 panel 模式，float 模式用 DOM ref 直接更新
   const [streamingAssistantText, setStreamingAssistantText] = useState("");
   const [streamingPhase, setStreamingPhase] =
     useState<StreamingPhase>("idle");
   const [sendErrorText, setSendErrorText] = useState<string | null>(null);
 
+  const activeSessionRef = useRef<ChatSessionDto | null>(null);
+  const sessionsRef = useRef<ChatSessionDto[]>([]);
+  const messagesRef = useRef<ChatMessageDto[]>([]);
   const isSendingRef = useRef(false);
-  // float 窗口的流式文本 DOM ref
+  const historyLoadingMoreRef = useRef(false);
   const streamingTextRef = useRef<HTMLParagraphElement | null>(null);
 
-  // 直接写入 DOM，绕过 React 状态更新（用于 float 窗口）
   const updateStreamingTextDOM = (text: string) => {
     if (streamingTextRef.current) {
       streamingTextRef.current.textContent = text;
     }
-    // 同时更新状态，用于 panel 模式
     setStreamingAssistantText(text);
   };
+
+  useEffect(() => {
+    activeSessionRef.current = activeSession;
+  }, [activeSession]);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     isSendingRef.current = isSending;
   }, [isSending]);
 
-  const loadConversation = async (options?: { background?: boolean }) => {
-    if (options?.background && isSendingRef.current) {
-      return;
-    }
+  useEffect(() => {
+    historyLoadingMoreRef.current = historyLoadingMore;
+  }, [historyLoadingMore]);
 
-    if (!options?.background) {
-      setIsLoading(true);
-    }
-
-    try {
-      const session = await desktopLocalService.getActiveChatSession();
-      const history = await desktopLocalService.getChatHistory({
+  const readSessionView = useCallback(async (session: ChatSessionDto): Promise<SessionViewPayload> => {
+    const [history, nextSessions] = await Promise.all([
+      desktopLocalService.getChatHistory({
         sessionId: session.sessionId,
         limit: historyLimit,
-      });
+      }),
+      desktopLocalService.listChatSessions(sessionListLimit),
+    ]);
+
+    return {
+      session:
+        nextSessions.find((candidate) => candidate.sessionId === session.sessionId) ??
+        session,
+      sessions: nextSessions,
+      history,
+    };
+  }, []);
+
+  const applySessionView = useCallback(
+    (
+      payload: SessionViewPayload,
+      options?: {
+        background?: boolean;
+      },
+    ) => {
+      const shouldPreserveLoadedPages =
+        Boolean(options?.background) &&
+        activeSessionRef.current?.sessionId === payload.session.sessionId &&
+        messagesRef.current.length > payload.history.messages.length;
+      const nextMessages = shouldPreserveLoadedPages
+        ? mergeMessages(messagesRef.current, payload.history.messages)
+        : payload.history.messages;
+      const nextSessions = options?.background
+        ? mergeSessions(sessionsRef.current, payload.sessions)
+        : payload.sessions;
+      const nextComposerMessage = formatStatusText(payload.session, payload.history.messages);
+      const sessionUnchanged =
+        activeSessionRef.current?.sessionId === payload.session.sessionId &&
+        activeSessionRef.current?.status === payload.session.status &&
+        activeSessionRef.current?.startedAt === payload.session.startedAt &&
+        activeSessionRef.current?.lastMessageAt === payload.session.lastMessageAt;
+      const sessionsUnchanged = areSessionsEqual(sessionsRef.current, nextSessions);
+      const historyHasMoreUnchanged = shouldPreserveLoadedPages
+        ? historyHasMore === historyHasMore
+        : historyHasMore === payload.history.hasMore;
+      const messagesUnchanged = areMessagesEqual(messagesRef.current, nextMessages);
+      const composerUnchanged = composerMessage === nextComposerMessage;
+
+      if (
+        sessionUnchanged &&
+        sessionsUnchanged &&
+        historyHasMoreUnchanged &&
+        messagesUnchanged &&
+        composerUnchanged
+      ) {
+        return;
+      }
 
       startTransition(() => {
-        setActiveSession(session);
-        setMessages(history.messages);
-        setComposerMessage(formatStatusText(session, history.messages));
+        if (!sessionUnchanged) {
+          setActiveSession(payload.session);
+        }
+
+        if (!sessionsUnchanged) {
+          setSessions(nextSessions);
+        }
+
+        if (!historyHasMoreUnchanged) {
+          setHistoryHasMore(shouldPreserveLoadedPages ? historyHasMore : payload.history.hasMore);
+        }
+
+        if (!messagesUnchanged) {
+          setMessages(nextMessages);
+        }
+
+        if (!composerUnchanged) {
+          setComposerMessage(nextComposerMessage);
+        }
       });
-    } catch (error) {
-      if (!options?.background) {
-        setComposerMessage(getErrorMessage(error));
+    },
+    [composerMessage, historyHasMore],
+  );
+
+  const loadConversation = useCallback(
+    async (options?: { background?: boolean; session?: ChatSessionDto }) => {
+      if (
+        options?.background &&
+        (isSendingRef.current || historyLoadingMoreRef.current)
+      ) {
+        return;
       }
-    } finally {
+
       if (!options?.background) {
-        setIsLoading(false);
+        setIsLoading(true);
       }
-    }
-  };
+
+      try {
+        const session =
+          options?.session ?? (await desktopLocalService.getActiveChatSession());
+        const payload = await readSessionView(session);
+        applySessionView(payload, options);
+      } catch (error) {
+        if (!options?.background) {
+          setComposerMessage(getErrorMessage(error));
+        }
+      } finally {
+        if (!options?.background) {
+          setIsLoading(false);
+        }
+      }
+    },
+    [applySessionView, readSessionView],
+  );
 
   useEffect(() => {
     void loadConversation();
 
     const intervalId = window.setInterval(() => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+
       void loadConversation({
         background: true,
       });
@@ -183,11 +392,11 @@ export const useChatPanel = () => {
       window.clearInterval(intervalId);
       window.removeEventListener("focus", handleFocus);
     };
-  }, []);
+  }, [loadConversation]);
 
   const sendMessage = async (input?: string) => {
     const text = (input ?? draft).trim();
-    if (!text) {
+    if (!text || !activeSessionRef.current) {
       return;
     }
 
@@ -205,7 +414,7 @@ export const useChatPanel = () => {
 
     try {
       const userResponse = await desktopLocalService.appendChatMessage({
-        ...(activeSession ? { sessionId: activeSession.sessionId } : {}),
+        sessionId: activeSessionRef.current.sessionId,
         role: "user",
         source: "chat",
         text,
@@ -213,6 +422,7 @@ export const useChatPanel = () => {
 
       startTransition(() => {
         setActiveSession(userResponse.session);
+        setSessions((current) => updateSessionList(current, userResponse.session));
         setMessages((current) => mergeMessages(current, [userResponse.message]));
         setDraft("");
         setComposerMessage(
@@ -246,6 +456,22 @@ export const useChatPanel = () => {
               localSkillReplyText = `好，我会在${localSkillRequest.displayTimeText}提醒你${createdReminder.text}。`;
               localSkillStatusText = "已创建本地提醒。";
             }
+          } else if (localSkillRequest.skillId === "explicit_remember") {
+            if (
+              localSkillRequest.parseError ||
+              !localSkillRequest.memoryText
+            ) {
+              localSkillReplyText =
+                localSkillRequest.parseError ??
+                "你可以说“记住这个：我喜欢深色模式”。";
+              localSkillStatusText = "记忆保存失败。";
+            } else {
+              const remembered = await desktopLocalService.rememberExplicitMemory({
+                text: localSkillRequest.memoryText,
+              });
+              localSkillReplyText = `好，我记住了：${remembered.memory.valueText}`;
+              localSkillStatusText = "已保存显式记忆。";
+            }
           } else {
             const localSkillResult = await runLocalSkill(localSkillRequest);
             localSkillReplyText = localSkillResult.replyText;
@@ -275,11 +501,11 @@ export const useChatPanel = () => {
 
         startTransition(() => {
           setActiveSession(assistantResponse.session);
+          setSessions((current) =>
+            updateSessionList(current, assistantResponse.session)
+          );
           setMessages((current) =>
-            mergeMessages(current, [
-              userResponse.message,
-              assistantResponse.message,
-            ]),
+            mergeMessages(current, [assistantResponse.message])
           );
           updateStreamingTextDOM("");
           setStreamingPhase("idle");
@@ -293,7 +519,6 @@ export const useChatPanel = () => {
         sessionId: userResponse.session.sessionId,
         onDelta: (nextText) => {
           setStreamingPhase("streaming");
-          // 直接更新 DOM，不触发 React 重渲染
           updateStreamingTextDOM(nextText);
         },
       });
@@ -302,8 +527,9 @@ export const useChatPanel = () => {
 
       startTransition(() => {
         setActiveSession(assistantResponse.session);
+        setSessions((current) => updateSessionList(current, assistantResponse.session));
         setMessages((current) =>
-          mergeMessages(current, [assistantResponse.message]),
+          mergeMessages(current, [assistantResponse.message])
         );
         updateStreamingTextDOM("");
         setStreamingPhase("idle");
@@ -323,33 +549,93 @@ export const useChatPanel = () => {
   const createNewSession = async () => {
     setIsLoading(true);
     setComposerMessage("正在创建新会话...");
-    
+
     try {
       const session = await desktopLocalService.createNewSession();
-      startTransition(() => {
-        setActiveSession(session);
-        setMessages([]);
-        setComposerMessage(`新会话已创建: ${session.sessionId.slice(0, 8)}...`);
-      });
+      const payload = await readSessionView(session);
+      applySessionView(payload);
     } catch (error) {
-      const errorMessage = getErrorMessage(error);
-      setComposerMessage(errorMessage);
+      setComposerMessage(getErrorMessage(error));
     } finally {
       setIsLoading(false);
     }
   };
 
-  const getSessionStats = async () => {
-    if (!activeSession) {
+  const switchSession = async (sessionId: string) => {
+    if (
+      sessionId === activeSessionRef.current?.sessionId ||
+      isSendingRef.current
+    ) {
+      return;
+    }
+
+    setSwitchingSessionId(sessionId);
+    setIsLoading(true);
+    setComposerMessage(`正在切换到会话 ${formatSessionId(sessionId)}...`);
+
+    try {
+      const session = await desktopLocalService.switchChatSession({ sessionId });
+      const payload = await readSessionView(session);
+      applySessionView(payload);
+    } catch (error) {
+      setComposerMessage(getErrorMessage(error));
+    } finally {
+      setSwitchingSessionId(null);
+      setIsLoading(false);
+    }
+  };
+
+  const loadOlderMessages = async () => {
+    const currentSession = activeSessionRef.current;
+    const oldestMessage = messages[0];
+
+    if (
+      !currentSession ||
+      !oldestMessage ||
+      historyLoadingMoreRef.current ||
+      !historyHasMore
+    ) {
+      return;
+    }
+
+    setHistoryLoadingMore(true);
+
+    try {
+      const history = await desktopLocalService.getChatHistory({
+        sessionId: currentSession.sessionId,
+        limit: historyLimit,
+        beforeMessageId: oldestMessage.messageId,
+      });
+
+      startTransition(() => {
+        setMessages((current) => prependMessages(current, history.messages));
+        setHistoryHasMore(history.hasMore);
+        setComposerMessage(
+          history.messages.length > 0
+            ? `已补载 ${history.messages.length} 条更早消息。`
+            : "已经到底了，没有更早消息。",
+        );
+      });
+    } catch (error) {
+      setComposerMessage(getErrorMessage(error));
+    } finally {
+      setHistoryLoadingMore(false);
+    }
+  };
+
+  const getSessionStats = useCallback(async () => {
+    if (!activeSessionRef.current) {
       return { messageCount: 0, userTokens: 0, assistantTokens: 0 };
     }
-    
+
     try {
-      return await desktopLocalService.getSessionStats(activeSession.sessionId);
+      return await desktopLocalService.getSessionStats(
+        activeSessionRef.current.sessionId,
+      );
     } catch {
       return { messageCount: messages.length, userTokens: 0, assistantTokens: 0 };
     }
-  };
+  }, [messages.length]);
 
   return {
     activeSession,
@@ -357,18 +643,25 @@ export const useChatPanel = () => {
     createNewSession,
     draft,
     getSessionStats,
+    historyHasMore,
+    historyLoadingMore,
     isLoading,
     isSending,
+    loadOlderMessages,
     messages,
     quickPrompts: quickPromptPresets,
     reloadConversation: loadConversation,
     sendMessage,
     sendErrorText,
+    sessions,
+    sessionsLoading: isLoading && sessions.length === 0,
     setDraft,
     setStreamingTextRef: (el: HTMLParagraphElement | null) => {
       streamingTextRef.current = el;
     },
     streamingAssistantText,
     streamingPhase,
+    switchSession,
+    switchingSessionId,
   };
 };

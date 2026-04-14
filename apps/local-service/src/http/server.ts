@@ -4,6 +4,9 @@ import { createPrefixedId, nowIso } from "@zhuochong/shared";
 import {
   chatAppendMessageRequestSchema,
   chatHistoryQuerySchema,
+  chatSessionSwitchRequestSchema,
+  companionEventRecordRequestSchema,
+  explicitMemoryRememberRequestSchema,
   diaryGetQuerySchema,
   diaryListQuerySchema,
   memoryListQuerySchema,
@@ -17,6 +20,12 @@ import {
   type ChatAppendMessageResponse,
   type ChatHistoryDto,
   type ChatSessionDto,
+  type ChatSessionSwitchRequest,
+  type CompanionEventRecordRequest,
+  type CompanionEventRecordResponse,
+  type CompanionProfileSummaryDto,
+  type ExplicitMemoryRememberRequest,
+  type ExplicitMemoryRememberResponse,
   type DiaryEntryDto,
   type DiaryListDto,
   type MemoryListDto,
@@ -46,6 +55,12 @@ import {
   mapSettingsUpdateRequestToPatch,
 } from "../application/mappers.js";
 import { getReminderRuntimeStatus } from "../application/reminder-scheduler.js";
+import {
+  recordCompanionEvent,
+  buildCompanionProfileSummary,
+  rememberConversationMemories,
+  rememberExplicitMemory,
+} from "../application/companion-memory.js";
 import type { LocalServiceRuntime } from "../application/runtime.js";
 import type { ConversationMessage, PetStateSnapshotRecord } from "../domain/models.js";
 
@@ -253,6 +268,69 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
       return;
     }
 
+    if (method === "POST" && url.pathname === "/chat/session/switch") {
+      try {
+        const parsed = chatSessionSwitchRequestSchema.safeParse(
+          await readJsonBody(request),
+        );
+
+        if (!parsed.success) {
+          const result = failure(
+            requestId,
+            "VALIDATION_ERROR",
+            "chat/session/switch 请求体校验失败。",
+            {
+              fieldErrors: parsed.error.issues.map((issue) => ({
+                field: issue.path.join(".") || "root",
+                reason: issue.message,
+              })),
+              ...(correlationId ? { correlationId } : {}),
+            },
+          );
+          sendResult(response, result.body, result.statusCode);
+          return;
+        }
+
+        const payload: ChatSessionSwitchRequest = parsed.data;
+        const session =
+          await runtime.repositories.conversationRepository.setActiveSession(
+            payload.sessionId,
+          );
+
+        if (!session) {
+          const result = failure(
+            requestId,
+            "NOT_FOUND",
+            "指定会话不存在。",
+            {
+              statusCode: 404,
+              ...(correlationId ? { correlationId } : {}),
+            },
+          );
+          sendResult(response, result.body, result.statusCode);
+          return;
+        }
+
+        sendResult<ChatSessionDto>(response, {
+          ok: true,
+          data: mapConversationSessionToDto(session),
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId,
+          "INTERNAL_ERROR",
+          "切换活动会话失败。",
+          {
+            statusCode: 500,
+            ...(correlationId ? { correlationId } : {}),
+          },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
+      return;
+    }
+
     if (method === "GET" && url.pathname === "/chat/session/stats") {
       const sessionId = url.searchParams.get("sessionId");
       if (!sessionId) {
@@ -424,6 +502,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           activeSession.sessionId,
           createdAt,
         );
+        await rememberConversationMemories(runtime, message);
 
         sendResult<ChatAppendMessageResponse>(response, {
           ok: true,
@@ -586,6 +665,125 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
         data: createDefaultSystemContextDto(settings),
         meta: createMeta(requestId, correlationId),
       });
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/memory/remember") {
+      try {
+        const parsed = explicitMemoryRememberRequestSchema.safeParse(
+          await readJsonBody(request),
+        );
+
+        if (!parsed.success) {
+          const result = failure(
+            requestId,
+            "VALIDATION_ERROR",
+            "memory/remember 请求体校验失败。",
+            {
+              fieldErrors: parsed.error.issues.map((issue) => ({
+                field: issue.path.join(".") || "root",
+                reason: issue.message,
+              })),
+              ...(correlationId ? { correlationId } : {}),
+            },
+          );
+          sendResult(response, result.body, result.statusCode);
+          return;
+        }
+
+        const payload: ExplicitMemoryRememberRequest = parsed.data;
+        const memory = await rememberExplicitMemory(runtime, payload);
+
+        sendResult<ExplicitMemoryRememberResponse>(response, {
+          ok: true,
+          data: {
+            memory: mapMemoryRecordToDto(memory),
+          },
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId,
+          "INTERNAL_ERROR",
+          "memory/remember 处理失败。",
+          {
+            statusCode: 500,
+            ...(correlationId ? { correlationId } : {}),
+          },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/memory/companion-event") {
+      try {
+        const parsed = companionEventRecordRequestSchema.safeParse(
+          await readJsonBody(request),
+        );
+
+        if (!parsed.success) {
+          const result = failure(
+            requestId,
+            "VALIDATION_ERROR",
+            "memory/companion-event 请求体校验失败。",
+            {
+              fieldErrors: parsed.error.issues.map((issue) => ({
+                field: issue.path.join(".") || "root",
+                reason: issue.message,
+              })),
+              ...(correlationId ? { correlationId } : {}),
+            },
+          );
+          sendResult(response, result.body, result.statusCode);
+          return;
+        }
+
+        const payload: CompanionEventRecordRequest = parsed.data;
+        const recorded = await recordCompanionEvent(runtime, payload);
+
+        sendResult<CompanionEventRecordResponse>(response, {
+          ok: true,
+          data: {
+            memories: recorded.memories.map(mapMemoryRecordToDto),
+            diary: mapDiaryEntryToDto(recorded.diary),
+          },
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId,
+          "INTERNAL_ERROR",
+          "memory/companion-event 处理失败。",
+          {
+            statusCode: 500,
+            ...(correlationId ? { correlationId } : {}),
+          },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
+      return;
+    }
+
+    if (method === "GET" && url.pathname === "/memory/profile-summary") {
+      try {
+        sendResult<CompanionProfileSummaryDto>(response, {
+          ok: true,
+          data: await buildCompanionProfileSummary(runtime),
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId,
+          "INTERNAL_ERROR",
+          "memory/profile-summary 处理失败。",
+          {
+            statusCode: 500,
+            ...(correlationId ? { correlationId } : {}),
+          },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
       return;
     }
 

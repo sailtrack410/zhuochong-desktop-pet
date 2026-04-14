@@ -54,6 +54,57 @@ type ZhuochongProductivitySnapshot = {
   };
 };
 
+type ZhuochongClipboardTextHistoryItem = {
+  itemId: string;
+  kind: "text";
+  text: string;
+  preview: string;
+  copiedAt: string;
+  pinnedAt?: string;
+};
+type ZhuochongClipboardImageHistoryItem = {
+  itemId: string;
+  kind: "image";
+  pngBase64: string;
+  width: number;
+  height: number;
+  copiedAt: string;
+  pinnedAt?: string;
+};
+type ZhuochongClipboardHistoryItem =
+  | ZhuochongClipboardTextHistoryItem
+  | ZhuochongClipboardImageHistoryItem;
+
+type ZhuochongClipboardState = {
+  history: ZhuochongClipboardHistoryItem[];
+  panel: {
+    pinned: boolean;
+  };
+  shortcut: {
+    accelerator: string;
+    defaultAccelerator: string;
+    isRegistered: boolean;
+  };
+};
+
+type ZhuochongShellAppearanceMode = "system" | "light" | "dark";
+type ZhuochongShellResolvedTheme = "light" | "dark";
+
+type ZhuochongShellAppearanceState = {
+  themeMode: ZhuochongShellAppearanceMode;
+  resolvedTheme: ZhuochongShellResolvedTheme;
+};
+
+type ZhuochongClipboardWriteResult = {
+  didWriteClipboard: boolean;
+  didAutoPaste: boolean;
+  fallbackReason?:
+    | "permission_required"
+    | "target_unavailable"
+    | "paste_failed"
+    | "unsupported_platform";
+};
+
 type ZhuochongChatHistoryQuery = {
   sessionId: string;
   limit?: number;
@@ -84,6 +135,13 @@ type ZhuochongDesktopBridge = {
   };
   desktop: {
     openControlPanel: () => Promise<boolean>;
+    getAppearance?: () => Promise<ZhuochongShellAppearanceState>;
+    updateThemeMode?: (
+      themeMode: ZhuochongShellAppearanceMode,
+    ) => Promise<ZhuochongShellAppearanceState>;
+    hideControlPanel?: () => Promise<boolean>;
+    showPet?: () => Promise<boolean>;
+    hidePet?: () => Promise<boolean>;
     showPetContextMenu: () => Promise<boolean>;
     quitApp: () => Promise<boolean>;
     showSystemNotification?: (payload: {
@@ -99,6 +157,23 @@ type ZhuochongDesktopBridge = {
       includeReminders: boolean;
       limit?: number;
     }) => Promise<ZhuochongProductivitySnapshot>;
+    subscribeAppearanceChanged?: (
+      listener: (state: ZhuochongShellAppearanceState) => void,
+    ) => (() => void);
+  };
+  clipboard?: {
+    getState: () => Promise<ZhuochongClipboardState>;
+    showPanel: () => Promise<boolean>;
+    hidePanel: () => Promise<boolean>;
+    togglePanelPinned: () => Promise<ZhuochongClipboardState>;
+    updateShortcut: (accelerator: string) => Promise<ZhuochongClipboardState>;
+    writeHistoryItem: (itemId: string) => Promise<ZhuochongClipboardWriteResult>;
+    togglePinned: (itemId: string) => Promise<ZhuochongClipboardState>;
+    deleteHistoryItem: (itemId: string) => Promise<ZhuochongClipboardState>;
+    clearHistory: () => Promise<ZhuochongClipboardState>;
+    subscribeStateChanged?: (
+      listener: (state: ZhuochongClipboardState) => void,
+    ) => (() => void);
   };
   localService: {
     baseUrl: string;

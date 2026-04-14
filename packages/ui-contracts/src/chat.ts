@@ -25,6 +25,10 @@ export const chatSessionSchema = z.object({
   lastMessageAt: z.string().datetime(),
 });
 
+export const chatSessionSwitchRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+});
+
 export const chatRespondRequestSchema = z.object({
   sessionId: sessionIdSchema,
   messageId: messageIdSchema,
@@ -80,14 +84,29 @@ export const chatHistorySchema = z.object({
   hasMore: z.boolean(),
 });
 
+export const chatSessionStatsSchema = z.object({
+  messageCount: z.number().int().nonnegative(),
+  userTokens: z.number().int().nonnegative(),
+  assistantTokens: z.number().int().nonnegative(),
+});
+
 export const chatSessionResultSchema = createContractResultSchema(chatSessionSchema);
+export const chatSessionListResultSchema = createContractResultSchema(
+  z.array(chatSessionSchema),
+);
 export const chatHistoryResultSchema = createContractResultSchema(chatHistorySchema);
+export const chatSessionStatsResultSchema = createContractResultSchema(
+  chatSessionStatsSchema,
+);
 
 export type ChatMessageDto = z.infer<typeof chatMessageSchema>;
 export type ChatSessionDto = z.infer<typeof chatSessionSchema>;
+export type ChatSessionSwitchRequest = z.infer<typeof chatSessionSwitchRequestSchema>;
+export type ChatSessionListDto = ChatSessionDto[];
 export type ChatRespondRequest = z.infer<typeof chatRespondRequestSchema>;
 export type ChatRespondResponse = z.infer<typeof chatRespondResponseSchema>;
 export type ChatAppendMessageRequest = z.infer<typeof chatAppendMessageRequestSchema>;
 export type ChatAppendMessageResponse = z.infer<typeof chatAppendMessageResponseSchema>;
 export type ChatHistoryQuery = z.infer<typeof chatHistoryQuerySchema>;
 export type ChatHistoryDto = z.infer<typeof chatHistorySchema>;
+export type ChatSessionStatsDto = z.infer<typeof chatSessionStatsSchema>;

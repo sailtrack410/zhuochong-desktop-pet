@@ -1,12 +1,15 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   app,
   BrowserWindow,
+  clipboard,
+  globalShortcut,
   ipcMain,
   Menu,
   Notification,
   Tray,
   nativeImage,
+  nativeTheme,
   screen,
   systemPreferences,
 } from "electron";
@@ -20,6 +23,7 @@ app.setName("桌宠 AI");
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(currentDir, "../../../..");
 const rendererEntry = join(currentDir, "../renderer/index.html");
+const desktopShellAppId = "com.zhuochong.desktop.pet";
 const localServiceBaseUrl =
   process.env.LOCAL_SERVICE_BASE_URL ?? "http://127.0.0.1:3765";
 const openControlPanelOnLaunch =
@@ -46,6 +50,11 @@ const floatWindowSize = {
   height: 180,
 } as const;
 
+const clipboardWindowSize = {
+  width: 468,
+  height: 560,
+} as const;
+
 type PetWindowLayoutMode = keyof typeof petWindowLayouts;
 
 const petWindowTopOverflowByLayout: Record<PetWindowLayoutMode, number> = {
@@ -53,7 +62,7 @@ const petWindowTopOverflowByLayout: Record<PetWindowLayoutMode, number> = {
   expanded: 168,
 };
 
-type RendererMode = "panel" | "pet" | "float";
+type RendererMode = "panel" | "pet" | "float" | "clipboard";
 
 type PetWindowPosition = {
   x: number;
@@ -105,6 +114,12 @@ type DesktopProductivitySnapshot = {
     reminders?: string;
   };
 };
+type ShellThemeMode = "system" | "light" | "dark";
+type ResolvedShellTheme = "light" | "dark";
+type ShellAppearanceStatePayload = {
+  themeMode: ShellThemeMode;
+  resolvedTheme: ResolvedShellTheme;
+};
 type RuntimeDetectionState = {
   available: boolean;
   value: boolean;
@@ -124,10 +139,77 @@ type RawNotificationSnapshot = {
   object: string | null;
   observedAt: string;
 };
+type ClipboardTextHistoryItem = {
+  itemId: string;
+  kind: "text";
+  text: string;
+  preview: string;
+  copiedAt: string;
+  pinnedAt?: string;
+};
+type ClipboardImageHistoryItem = {
+  itemId: string;
+  kind: "image";
+  pngBase64: string;
+  width: number;
+  height: number;
+  copiedAt: string;
+  pinnedAt?: string;
+};
+type ClipboardHistoryItem =
+  | ClipboardTextHistoryItem
+  | ClipboardImageHistoryItem;
+type ClipboardStatePayload = {
+  history: ClipboardHistoryItem[];
+  panel: {
+    pinned: boolean;
+  };
+  shortcut: {
+    accelerator: string;
+    defaultAccelerator: string;
+    isRegistered: boolean;
+  };
+};
+type ClipboardWriteResult = {
+  didWriteClipboard: boolean;
+  didAutoPaste: boolean;
+  fallbackReason?:
+    | "permission_required"
+    | "target_unavailable"
+    | "paste_failed"
+    | "unsupported_platform";
+};
+
+type ClipboardRawSnapshot =
+  | {
+      kind: "image";
+      signature: string;
+      width: number;
+      height: number;
+      image: Electron.NativeImage;
+    }
+  | {
+      kind: "text";
+      signature: string;
+      text: string;
+    };
+
+type DesktopShellState = {
+  appearance?: {
+    themeMode?: ShellThemeMode;
+  };
+  clipboard?: {
+    shortcutAccelerator?: string;
+    history?: ClipboardHistoryItem[];
+    panelPinned?: boolean;
+    panelPosition?: PetWindowPosition;
+  };
+};
 
 let petWindow: BrowserWindow | null = null;
 let floatWindow: BrowserWindow | null = null;
 let controlWindow: BrowserWindow | null = null;
+let clipboardWindow: BrowserWindow | null = null;
 let persistTimer: NodeJS.Timeout | null = null;
 let localServiceProcess: ChildProcess | null = null;
 let statusItem: Tray | null = null;
@@ -156,6 +238,15 @@ let focusModeNotificationSubscriptionIds: Array<{
   center: FocusModeNotificationCenter;
   id: number;
 }> = [];
+let clipboardMonitorTimer: NodeJS.Timeout | null = null;
+let clipboardHistory: ClipboardHistoryItem[] = [];
+let clipboardShortcutAccelerator = "CommandOrControl+Shift+V";
+let clipboardShortcutRegistered = false;
+let lastClipboardSignature = "";
+let clipboardReturnTargetBundleId: string | null = null;
+let clipboardPanelPinned = false;
+let clipboardPanelPosition: PetWindowPosition | null = null;
+let shellThemeMode: ShellThemeMode = "system";
 
 const focusModeCandidateNotifications = [
   "com.apple.controlcenter.focusmodes",
@@ -178,6 +269,13 @@ const defaultProductivityQueryLimit = 5;
 const productivityUpcomingHorizonDays = 14;
 const macosCalendarAppPath = "/System/Applications/Calendar.app";
 const macosRemindersAppPath = "/System/Applications/Reminders.app";
+const defaultShellThemeMode: ShellThemeMode = "system";
+const defaultClipboardShortcutAccelerator =
+  process.platform === "darwin"
+    ? "Control+Alt+V"
+    : "CommandOrControl+Shift+V";
+const clipboardHistoryLimit = 40;
+const clipboardPollIntervalMs = 900;
 
 const getLocalServiceEntry = () =>
   app.isPackaged
@@ -209,9 +307,656 @@ const getTrayIconPath = () =>
 const getWindowStateFilePath = () =>
   join(app.getPath("userData"), "pet-window-state.json");
 
+const getDesktopShellStateFilePath = () =>
+  join(app.getPath("userData"), "desktop-shell-state.json");
+
 const getDesktopRuntimeStateFilePath = () =>
   process.env.ZHUOCHONG_RUNTIME_STATE_FILE ??
   join(tmpdir(), "zhuochong-desktop-runtime-state.json");
+
+const createClipboardItemId = () =>
+  `clip_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+const buildClipboardTextPreview = (text: string) => {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const preview = normalized.replace(/\s+/g, " ");
+  return preview.length > 120 ? `${preview.slice(0, 117)}...` : preview;
+};
+
+const buildClipboardImageSignature = (
+  pngBase64: string,
+  width: number,
+  height: number,
+) => `image:${width}x${height}:${pngBase64.length}:${pngBase64.slice(0, 64)}`;
+
+const compareIsoTimeDesc = (left?: string, right?: string) =>
+  Date.parse(right ?? "") - Date.parse(left ?? "");
+
+const isShellThemeMode = (value: unknown): value is ShellThemeMode =>
+  value === "system" || value === "light" || value === "dark";
+
+const resolveShellTheme = (
+  themeMode: ShellThemeMode = shellThemeMode,
+): ResolvedShellTheme => {
+  if (themeMode === "light") {
+    return "light";
+  }
+
+  if (themeMode === "dark") {
+    return "dark";
+  }
+
+  return nativeTheme.shouldUseDarkColors ? "dark" : "light";
+};
+
+const getControlWindowBackgroundColor = () =>
+  resolveShellTheme() === "dark" ? "#111317" : "#f7efe2";
+
+const getClipboardWindowBackgroundColor = () =>
+  resolveShellTheme() === "dark" ? "#121417" : "#f6efe4";
+
+const sortClipboardHistory = (
+  items: ClipboardHistoryItem[],
+): ClipboardHistoryItem[] =>
+  [...items].sort((left, right) => {
+    const leftPinned = Boolean(left.pinnedAt);
+    const rightPinned = Boolean(right.pinnedAt);
+
+    if (leftPinned !== rightPinned) {
+      return leftPinned ? -1 : 1;
+    }
+
+    if (leftPinned && rightPinned) {
+      const pinnedCompare = compareIsoTimeDesc(left.pinnedAt, right.pinnedAt);
+      if (pinnedCompare !== 0) {
+        return pinnedCompare;
+      }
+    }
+
+    return compareIsoTimeDesc(left.copiedAt, right.copiedAt);
+  });
+
+const isClipboardHistoryItem = (
+  value: unknown,
+): value is ClipboardHistoryItem => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Partial<ClipboardHistoryItem>;
+  if (
+    typeof candidate.itemId !== "string" ||
+    typeof candidate.copiedAt !== "string"
+  ) {
+    return false;
+  }
+
+  if (candidate.kind === "text") {
+    return typeof candidate.text === "string";
+  }
+
+  if (candidate.kind === "image") {
+    return (
+      typeof candidate.pngBase64 === "string" &&
+      typeof candidate.width === "number" &&
+      typeof candidate.height === "number"
+    );
+  }
+
+  return false;
+};
+
+const normalizeClipboardHistory = (items: unknown): ClipboardHistoryItem[] => {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  const next: ClipboardHistoryItem[] = [];
+  const seenSignatures = new Set<string>();
+
+  for (const entry of items) {
+    if (!isClipboardHistoryItem(entry)) {
+      const legacyEntry = entry as Partial<{
+        itemId: string;
+        text: string;
+        copiedAt: string;
+      }>;
+
+      if (
+        typeof legacyEntry.itemId === "string" &&
+        typeof legacyEntry.text === "string" &&
+        typeof legacyEntry.copiedAt === "string"
+      ) {
+        const text = legacyEntry.text.replace(/\r\n/g, "\n");
+        const signature = `text:${text}`;
+        if (!text.trim() || seenSignatures.has(signature)) {
+          continue;
+        }
+
+      seenSignatures.add(signature);
+      next.push({
+        itemId: legacyEntry.itemId,
+        kind: "text",
+        text,
+        preview: buildClipboardTextPreview(text),
+        copiedAt: legacyEntry.copiedAt,
+        ...(typeof (legacyEntry as { pinnedAt?: unknown }).pinnedAt === "string"
+          ? { pinnedAt: (legacyEntry as { pinnedAt: string }).pinnedAt }
+          : {}),
+      });
+      }
+
+      continue;
+    }
+
+    if (entry.kind === "text") {
+      const text = entry.text.replace(/\r\n/g, "\n");
+      const signature = `text:${text}`;
+      if (!text.trim() || seenSignatures.has(signature)) {
+        continue;
+      }
+
+      seenSignatures.add(signature);
+      next.push({
+        itemId: entry.itemId,
+        kind: "text",
+        text,
+        preview: buildClipboardTextPreview(text),
+        copiedAt: entry.copiedAt,
+        ...(typeof entry.pinnedAt === "string"
+          ? { pinnedAt: entry.pinnedAt }
+          : {}),
+      });
+    } else {
+      const signature = buildClipboardImageSignature(
+        entry.pngBase64,
+        entry.width,
+        entry.height,
+      );
+      if (!entry.pngBase64 || seenSignatures.has(signature)) {
+        continue;
+      }
+
+      seenSignatures.add(signature);
+      next.push({
+        itemId: entry.itemId,
+        kind: "image",
+        pngBase64: entry.pngBase64,
+        width: entry.width,
+        height: entry.height,
+        copiedAt: entry.copiedAt,
+        ...(typeof entry.pinnedAt === "string"
+          ? { pinnedAt: entry.pinnedAt }
+          : {}),
+      });
+    }
+
+    if (next.length >= clipboardHistoryLimit) {
+      break;
+    }
+  }
+
+  return sortClipboardHistory(next);
+};
+
+const readDesktopShellState = (): DesktopShellState => {
+  const filePath = getDesktopShellStateFilePath();
+  if (!existsSync(filePath)) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(readFileSync(filePath, "utf8")) as DesktopShellState;
+  } catch {
+    return {};
+  }
+};
+
+const writeDesktopShellState = () => {
+  const filePath = getDesktopShellStateFilePath();
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(
+    filePath,
+    JSON.stringify(
+      {
+        appearance: {
+          themeMode: shellThemeMode,
+        },
+        clipboard: {
+          shortcutAccelerator: clipboardShortcutAccelerator,
+          history: clipboardHistory,
+          panelPinned: clipboardPanelPinned,
+          ...(clipboardPanelPosition
+            ? {
+                panelPosition: clipboardPanelPosition,
+              }
+            : {}),
+        },
+      } satisfies DesktopShellState,
+      null,
+      2,
+    ),
+    "utf8",
+  );
+};
+
+const loadDesktopShellState = () => {
+  const persisted = readDesktopShellState();
+  shellThemeMode = isShellThemeMode(persisted.appearance?.themeMode)
+    ? persisted.appearance.themeMode
+    : defaultShellThemeMode;
+  clipboardShortcutAccelerator =
+    persisted.clipboard?.shortcutAccelerator?.trim() ||
+    defaultClipboardShortcutAccelerator;
+  clipboardHistory = normalizeClipboardHistory(persisted.clipboard?.history);
+  clipboardPanelPinned = Boolean(persisted.clipboard?.panelPinned);
+  clipboardPanelPosition =
+    persisted.clipboard?.panelPosition &&
+    Number.isFinite(persisted.clipboard.panelPosition.x) &&
+    Number.isFinite(persisted.clipboard.panelPosition.y)
+      ? {
+          x: Math.round(persisted.clipboard.panelPosition.x),
+          y: Math.round(persisted.clipboard.panelPosition.y),
+        }
+      : null;
+};
+
+const buildShellAppearanceStatePayload = (): ShellAppearanceStatePayload => ({
+  themeMode: shellThemeMode,
+  resolvedTheme: resolveShellTheme(),
+});
+
+const buildClipboardStatePayload = (): ClipboardStatePayload => ({
+  history: clipboardHistory,
+  panel: {
+    pinned: clipboardPanelPinned,
+  },
+  shortcut: {
+    accelerator: clipboardShortcutAccelerator,
+    defaultAccelerator: defaultClipboardShortcutAccelerator,
+    isRegistered: clipboardShortcutRegistered,
+  },
+});
+
+const broadcastClipboardState = () => {
+  const payload = buildClipboardStatePayload();
+  const windows = [clipboardWindow];
+
+  for (const window of windows) {
+    if (!window || window.isDestroyed()) {
+      continue;
+    }
+
+    window.webContents.send("clipboard:state-changed", payload);
+  }
+};
+
+const broadcastShellAppearanceState = () => {
+  const payload = buildShellAppearanceStatePayload();
+  const windows = [petWindow, floatWindow, controlWindow, clipboardWindow];
+
+  for (const window of windows) {
+    if (!window || window.isDestroyed()) {
+      continue;
+    }
+
+    window.webContents.send("desktop:appearance-changed", payload);
+  }
+};
+
+const syncWindowBackgroundColors = () => {
+  if (controlWindow && !controlWindow.isDestroyed()) {
+    controlWindow.setBackgroundColor(getControlWindowBackgroundColor());
+  }
+
+  if (clipboardWindow && !clipboardWindow.isDestroyed()) {
+    clipboardWindow.setBackgroundColor(getClipboardWindowBackgroundColor());
+  }
+};
+
+const upsertClipboardHistoryItem = (
+  nextItem:
+    | {
+        kind: "text";
+        text: string;
+      }
+    | {
+        kind: "image";
+        pngBase64: string;
+        width: number;
+        height: number;
+      },
+  options?: {
+    copiedAt?: string;
+    persist?: boolean;
+  },
+) => {
+  const copiedAt = options?.copiedAt ?? new Date().toISOString();
+  let existingIndex = -1;
+  let item: ClipboardHistoryItem | null = null;
+
+  if (nextItem.kind === "text") {
+    const normalizedText = nextItem.text.replace(/\r\n/g, "\n");
+    if (!normalizedText.trim()) {
+      return;
+    }
+
+    existingIndex = clipboardHistory.findIndex(
+      (item) => item.kind === "text" && item.text === normalizedText,
+    );
+    item =
+      existingIndex >= 0
+        ? {
+            itemId: clipboardHistory[existingIndex]!.itemId,
+            kind: "text",
+            text: normalizedText,
+            copiedAt,
+            preview: buildClipboardTextPreview(normalizedText),
+            ...(clipboardHistory[existingIndex]?.pinnedAt
+              ? { pinnedAt: clipboardHistory[existingIndex]!.pinnedAt }
+              : {}),
+          }
+        : {
+            itemId: createClipboardItemId(),
+            kind: "text",
+            text: normalizedText,
+            preview: buildClipboardTextPreview(normalizedText),
+            copiedAt,
+          };
+  } else {
+    if (!nextItem.pngBase64) {
+      return;
+    }
+
+    const signature = buildClipboardImageSignature(
+      nextItem.pngBase64,
+      nextItem.width,
+      nextItem.height,
+    );
+    existingIndex = clipboardHistory.findIndex(
+      (item) =>
+        item.kind === "image" &&
+        buildClipboardImageSignature(
+          item.pngBase64,
+          item.width,
+          item.height,
+        ) === signature,
+    );
+    item =
+      existingIndex >= 0
+        ? {
+            ...clipboardHistory[existingIndex]!,
+            copiedAt,
+          }
+        : {
+            itemId: createClipboardItemId(),
+            kind: "image",
+            pngBase64: nextItem.pngBase64,
+            width: nextItem.width,
+            height: nextItem.height,
+            copiedAt,
+          };
+  }
+
+  if (!item) {
+    return;
+  }
+
+  const remaining =
+    existingIndex >= 0
+      ? clipboardHistory.filter((_, index) => index !== existingIndex)
+      : clipboardHistory;
+
+  clipboardHistory = sortClipboardHistory([item, ...remaining]).slice(
+    0,
+    clipboardHistoryLimit,
+  );
+
+  if (options?.persist !== false) {
+    writeDesktopShellState();
+  }
+
+  broadcastClipboardState();
+};
+
+const deleteClipboardHistoryItem = (itemId: string) => {
+  clipboardHistory = clipboardHistory.filter((item) => item.itemId !== itemId);
+  writeDesktopShellState();
+  broadcastClipboardState();
+  return buildClipboardStatePayload();
+};
+
+const toggleClipboardHistoryPinned = (itemId: string) => {
+  const now = new Date().toISOString();
+  let didChange = false;
+
+  clipboardHistory = sortClipboardHistory(
+    clipboardHistory.map((item) => {
+      if (item.itemId !== itemId) {
+        return item;
+      }
+
+      didChange = true;
+      if (item.pinnedAt) {
+        const { pinnedAt: _removedPinnedAt, ...rest } = item;
+        return rest;
+      }
+
+      return {
+        ...item,
+        pinnedAt: now,
+      };
+    }),
+  );
+
+  if (!didChange) {
+    throw new Error("剪贴板历史中没有找到这一条。");
+  }
+
+  writeDesktopShellState();
+  broadcastClipboardState();
+  return buildClipboardStatePayload();
+};
+
+const toggleClipboardPanelPinned = () => {
+  clipboardPanelPinned = !clipboardPanelPinned;
+  if (clipboardWindow && !clipboardWindow.isDestroyed() && clipboardWindow.isVisible()) {
+    clipboardPanelPosition = clampClipboardWindowPosition(
+      getWindowPosition(clipboardWindow),
+    );
+  }
+  writeDesktopShellState();
+  broadcastClipboardState();
+  refreshStatusItemMenu();
+  return buildClipboardStatePayload();
+};
+
+const updateShellThemeMode = (themeMode: ShellThemeMode) => {
+  shellThemeMode = themeMode;
+  writeDesktopShellState();
+  syncWindowBackgroundColors();
+  broadcastShellAppearanceState();
+  return buildShellAppearanceStatePayload();
+};
+
+const clearClipboardHistory = () => {
+  clipboardHistory = clipboardHistory.filter((item) => Boolean(item.pinnedAt));
+  writeDesktopShellState();
+  broadcastClipboardState();
+  return buildClipboardStatePayload();
+};
+
+const readRawClipboardSnapshot = (): ClipboardRawSnapshot | null => {
+  const availableFormats = clipboard.availableFormats();
+  const hasImage = availableFormats.some((format) =>
+    format.toLowerCase().startsWith("image/"),
+  );
+
+  if (hasImage) {
+    const image = clipboard.readImage();
+    if (!image.isEmpty()) {
+      const { width, height } = image.getSize();
+      if (width > 0 && height > 0) {
+        return {
+          kind: "image",
+          signature: `image:${width}x${height}`,
+          width,
+          height,
+          image,
+        };
+      }
+    }
+  }
+
+  const text = clipboard.readText().replace(/\r\n/g, "\n");
+  if (!text.trim()) {
+    return null;
+  }
+
+  return {
+    kind: "text",
+    signature: `text:${text}`,
+    text,
+  };
+};
+
+const readClipboardSnapshot = (): {
+  signature: string;
+  item:
+    | {
+        kind: "text";
+        text: string;
+      }
+    | {
+        kind: "image";
+        pngBase64: string;
+        width: number;
+        height: number;
+      };
+} | null => {
+  const rawSnapshot = readRawClipboardSnapshot();
+  if (!rawSnapshot) {
+    return null;
+  }
+
+  if (rawSnapshot.kind === "text") {
+    return {
+      signature: rawSnapshot.signature,
+      item: {
+        kind: "text",
+        text: rawSnapshot.text,
+      },
+    };
+  }
+
+  const pngBase64 = rawSnapshot.image.toPNG().toString("base64");
+  if (!pngBase64) {
+    return null;
+  }
+
+  return {
+    signature: buildClipboardImageSignature(
+      pngBase64,
+      rawSnapshot.width,
+      rawSnapshot.height,
+    ),
+    item: {
+      kind: "image",
+      pngBase64,
+      width: rawSnapshot.width,
+      height: rawSnapshot.height,
+    },
+  };
+};
+
+const readFrontmostApplicationBundleId = (): string | null => {
+  if (process.platform !== "darwin") {
+    return null;
+  }
+
+  if (!systemPreferences.isTrustedAccessibilityClient(false)) {
+    return null;
+  }
+
+  const result = spawnSync(
+    "osascript",
+    [
+      "-e",
+      'tell application "System Events" to get bundle identifier of first application process whose frontmost is true',
+    ],
+    {
+      encoding: "utf8",
+      timeout: 800,
+    },
+  );
+
+  if (result.status !== 0) {
+    return null;
+  }
+
+  const bundleId = result.stdout.trim();
+  if (
+    !bundleId ||
+    bundleId === desktopShellAppId ||
+    bundleId === "com.github.electron"
+  ) {
+    return null;
+  }
+
+  return bundleId;
+};
+
+const pasteClipboardIntoCapturedTarget = async (): Promise<ClipboardWriteResult> => {
+  if (process.platform !== "darwin") {
+    return {
+      didWriteClipboard: true,
+      didAutoPaste: false,
+      fallbackReason: "unsupported_platform",
+    };
+  }
+
+  if (!systemPreferences.isTrustedAccessibilityClient(false)) {
+    return {
+      didWriteClipboard: true,
+      didAutoPaste: false,
+      fallbackReason: "permission_required",
+    };
+  }
+
+  if (!clipboardReturnTargetBundleId) {
+    return {
+      didWriteClipboard: true,
+      didAutoPaste: false,
+      fallbackReason: "target_unavailable",
+    };
+  }
+
+  const script = [
+    `tell application id "${clipboardReturnTargetBundleId}" to activate`,
+    "delay 0.08",
+    'tell application "System Events"',
+    'keystroke "v" using command down',
+    "end tell",
+  ].join("\n");
+
+  try {
+    await runCommand("osascript", ["-e", script], 2_500);
+    return {
+      didWriteClipboard: true,
+      didAutoPaste: true,
+    };
+  } catch {
+    return {
+      didWriteClipboard: true,
+      didAutoPaste: false,
+      fallbackReason: "paste_failed",
+    };
+  }
+};
 
 const createAppIcon = () => {
   const iconPath = getTrayIconPath();
@@ -1743,6 +2488,11 @@ const showFloatWindow = () => {
   }
 
   syncFloatWindowPosition();
+  if (typeof floatWindow.showInactive === "function") {
+    floatWindow.showInactive();
+    return;
+  }
+
   floatWindow.show();
 };
 
@@ -1752,6 +2502,256 @@ const hideFloatWindow = () => {
   }
 
   floatWindow.hide();
+};
+
+const clampClipboardWindowPosition = (
+  position: PetWindowPosition,
+  size = clipboardWindowSize,
+  point = position,
+): PetWindowPosition => {
+  const display = screen.getDisplayNearestPoint(point);
+  const workArea = display.workArea;
+  const maxX = workArea.x + workArea.width - size.width;
+  const maxY = workArea.y + workArea.height - size.height;
+
+  return {
+    x: Math.max(workArea.x, Math.min(position.x, maxX)),
+    y: Math.max(workArea.y, Math.min(position.y, maxY)),
+  };
+};
+
+const getClipboardWindowPopupPosition = (
+  size = clipboardWindowSize,
+): PetWindowPosition => {
+  const cursorPoint = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(cursorPoint);
+  const workArea = display.workArea;
+  const preferredAboveY = cursorPoint.y - size.height - 20;
+  const canShowAbove = preferredAboveY >= workArea.y + 12;
+  const preferredBelowY = cursorPoint.y + 20;
+
+  return clampClipboardWindowPosition(
+    {
+      x: cursorPoint.x - Math.round(size.width / 2),
+      y: canShowAbove ? preferredAboveY : preferredBelowY,
+    },
+    size,
+    cursorPoint,
+  );
+};
+
+const positionClipboardWindow = (window: BrowserWindow) => {
+  const targetPosition =
+    clipboardPanelPinned && clipboardPanelPosition
+      ? clampClipboardWindowPosition(clipboardPanelPosition)
+      : getClipboardWindowPopupPosition();
+
+  window.setPosition(targetPosition.x, targetPosition.y);
+};
+
+const persistClipboardWindowPosition = (window: BrowserWindow) => {
+  if (window.isDestroyed() || !clipboardPanelPinned) {
+    return;
+  }
+
+  const nextPosition = clampClipboardWindowPosition(getWindowPosition(window));
+  if (
+    clipboardPanelPosition &&
+    clipboardPanelPosition.x === nextPosition.x &&
+    clipboardPanelPosition.y === nextPosition.y
+  ) {
+    return;
+  }
+
+  clipboardPanelPosition = nextPosition;
+  writeDesktopShellState();
+};
+
+const showClipboardWindow = () => {
+  if (!clipboardWindow || clipboardWindow.isDestroyed()) {
+    clipboardWindow = createClipboardWindow();
+  }
+
+  clipboardReturnTargetBundleId = readFrontmostApplicationBundleId();
+
+  if (clipboardWindow.isMinimized()) {
+    clipboardWindow.restore();
+  }
+
+  positionClipboardWindow(clipboardWindow);
+  clipboardWindow.show();
+  clipboardWindow.focus();
+  refreshStatusItemMenu();
+  return clipboardWindow;
+};
+
+const hideClipboardWindow = () => {
+  if (!clipboardWindow || clipboardWindow.isDestroyed()) {
+    return;
+  }
+
+  clipboardWindow.hide();
+  refreshStatusItemMenu();
+};
+
+const toggleClipboardWindow = () => {
+  if (!clipboardWindow || clipboardWindow.isDestroyed()) {
+    showClipboardWindow();
+    return true;
+  }
+
+  if (clipboardWindow.isVisible()) {
+    hideClipboardWindow();
+    return true;
+  }
+
+  showClipboardWindow();
+  return true;
+};
+
+const registerClipboardShortcut = (accelerator: string) => {
+  const normalized = accelerator.trim();
+  if (!normalized) {
+    throw new Error("快捷键不能为空。");
+  }
+
+  const previousAccelerator = clipboardShortcutAccelerator;
+  const previousRegistered =
+    clipboardShortcutRegistered || globalShortcut.isRegistered(previousAccelerator);
+
+  if (previousRegistered && previousAccelerator) {
+    globalShortcut.unregister(previousAccelerator);
+  }
+
+  try {
+    const registered = globalShortcut.register(normalized, () => {
+      toggleClipboardWindow();
+    });
+
+    if (!registered) {
+      if (previousRegistered && previousAccelerator && previousAccelerator !== normalized) {
+        clipboardShortcutRegistered = globalShortcut.register(
+          previousAccelerator,
+          () => {
+            toggleClipboardWindow();
+          },
+        );
+      } else {
+        clipboardShortcutRegistered = false;
+      }
+
+      throw new Error("这个快捷键不可用，可能已被系统或其他应用占用。");
+    }
+
+    clipboardShortcutAccelerator = normalized;
+    clipboardShortcutRegistered = true;
+    writeDesktopShellState();
+    broadcastClipboardState();
+    return buildClipboardStatePayload();
+  } catch (error) {
+    if (previousRegistered && previousAccelerator && previousAccelerator !== normalized) {
+      clipboardShortcutRegistered = globalShortcut.isRegistered(previousAccelerator);
+    }
+
+    throw error instanceof Error
+      ? error
+      : new Error("注册剪贴板快捷键失败。");
+  }
+};
+
+const ensureClipboardShortcutRegistered = () => {
+  try {
+    registerClipboardShortcut(clipboardShortcutAccelerator);
+  } catch (error) {
+    clipboardShortcutRegistered = false;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[clipboard] shortcut register failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`,
+    );
+
+    if (clipboardShortcutAccelerator !== defaultClipboardShortcutAccelerator) {
+      clipboardShortcutAccelerator = defaultClipboardShortcutAccelerator;
+      writeDesktopShellState();
+
+      try {
+        registerClipboardShortcut(defaultClipboardShortcutAccelerator);
+      } catch (fallbackError) {
+        clipboardShortcutRegistered = false;
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[clipboard] default shortcut register failed: ${
+            fallbackError instanceof Error
+              ? fallbackError.message
+              : "unknown error"
+          }`,
+        );
+      }
+    }
+  }
+};
+
+const syncClipboardHistoryFromSystem = () => {
+  try {
+    const rawSnapshot = readRawClipboardSnapshot();
+    if (!rawSnapshot || rawSnapshot.signature === lastClipboardSignature) {
+      return;
+    }
+
+    lastClipboardSignature = rawSnapshot.signature;
+    const snapshot = readClipboardSnapshot();
+    if (!snapshot) {
+      return;
+    }
+
+    lastClipboardSignature = snapshot.signature;
+    upsertClipboardHistoryItem(snapshot.item);
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[clipboard] read failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`,
+    );
+  }
+};
+
+const startClipboardMonitor = () => {
+  if (clipboardMonitorTimer) {
+    return;
+  }
+
+  try {
+    const rawSnapshot = readRawClipboardSnapshot();
+    if (rawSnapshot) {
+      lastClipboardSignature = rawSnapshot.signature;
+      const snapshot = readClipboardSnapshot();
+      if (snapshot) {
+        lastClipboardSignature = snapshot.signature;
+        upsertClipboardHistoryItem(snapshot.item, {
+          persist: true,
+        });
+      }
+    } else {
+      lastClipboardSignature = "";
+    }
+  } catch {
+    lastClipboardSignature = "";
+  }
+
+  clipboardMonitorTimer = setInterval(() => {
+    syncClipboardHistoryFromSystem();
+  }, clipboardPollIntervalMs);
+};
+
+const stopClipboardMonitor = () => {
+  if (!clipboardMonitorTimer) {
+    return;
+  }
+
+  clearInterval(clipboardMonitorTimer);
+  clipboardMonitorTimer = null;
 };
 
 const logLocalServiceOutput = (
@@ -2043,6 +3043,7 @@ const hidePetWindow = () => {
     return;
   }
 
+  hideFloatWindow();
   petWindow.hide();
   refreshStatusItemMenu();
 };
@@ -2072,6 +3073,17 @@ const createStatusItemMenu = () =>
           : "打开控制台",
       click: () => {
         toggleControlWindow();
+      },
+    },
+    {
+      label:
+        clipboardWindow &&
+        !clipboardWindow.isDestroyed() &&
+        clipboardWindow.isVisible()
+          ? "隐藏剪贴板"
+          : "打开剪贴板",
+      click: () => {
+        toggleClipboardWindow();
       },
     },
     {
@@ -2156,6 +3168,12 @@ const showPetContextMenu = () => {
       },
     },
     {
+      label: "打开剪贴板",
+      click: () => {
+        showClipboardWindow();
+      },
+    },
+    {
       label: "隐藏桌宠",
       click: () => {
         hidePetWindow();
@@ -2184,9 +3202,6 @@ const createStatusItem = () => {
   statusItem = new Tray(icon);
   statusItem.setToolTip("桌宠 AI");
   refreshStatusItemMenu();
-  statusItem.on("click", () => {
-    toggleControlWindow();
-  });
   statusItem.on("right-click", () => {
     refreshStatusItemMenu();
     statusItem?.popUpContextMenu();
@@ -2223,6 +3238,12 @@ const configureMacApplicationShell = () => {
             label: "显示桌宠",
             click: () => {
               showPetWindow();
+            },
+          },
+          {
+            label: "打开剪贴板",
+            click: () => {
+              showClipboardWindow();
             },
           },
           {
@@ -2360,8 +3381,101 @@ const registerIpcHandlers = () => {
     return true;
   });
 
+  ipcMain.handle("clipboard:get-state", () => buildClipboardStatePayload());
+
+  ipcMain.handle("clipboard:show-panel", () => {
+    showClipboardWindow();
+    return true;
+  });
+
+  ipcMain.handle("clipboard:hide-panel", () => {
+    hideClipboardWindow();
+    return true;
+  });
+
+  ipcMain.handle("clipboard:toggle-panel-pinned", () =>
+    toggleClipboardPanelPinned(),
+  );
+
+  ipcMain.handle("clipboard:update-shortcut", (_event, accelerator: string) =>
+    registerClipboardShortcut(accelerator),
+  );
+
+  ipcMain.handle("clipboard:write-history-item", (_event, itemId: string) => {
+    const item = clipboardHistory.find((entry) => entry.itemId === itemId);
+    if (!item) {
+      throw new Error("剪贴板历史中没有找到这一条。");
+    }
+
+    if (item.kind === "text") {
+      clipboard.writeText(item.text);
+      lastClipboardSignature = `text:${item.text}`;
+      upsertClipboardHistoryItem({
+        kind: "text",
+        text: item.text,
+      });
+    } else {
+      const image = nativeImage.createFromDataURL(
+        `data:image/png;base64,${item.pngBase64}`,
+      );
+      clipboard.writeImage(image);
+      lastClipboardSignature = buildClipboardImageSignature(
+        item.pngBase64,
+        item.width,
+        item.height,
+      );
+      upsertClipboardHistoryItem({
+        kind: "image",
+        pngBase64: item.pngBase64,
+        width: item.width,
+        height: item.height,
+      });
+    }
+
+    hideClipboardWindow();
+    return pasteClipboardIntoCapturedTarget().then((result) => {
+      clipboardReturnTargetBundleId = null;
+      return result;
+    });
+  });
+
+  ipcMain.handle("clipboard:toggle-pinned", (_event, itemId: string) =>
+    toggleClipboardHistoryPinned(itemId),
+  );
+
+  ipcMain.handle("clipboard:delete-history-item", (_event, itemId: string) =>
+    deleteClipboardHistoryItem(itemId),
+  );
+
+  ipcMain.handle("clipboard:clear-history", () => clearClipboardHistory());
+
   ipcMain.handle("desktop:open-control-panel", () => {
     showControlWindow();
+    return true;
+  });
+
+  ipcMain.handle("desktop:get-appearance", () => buildShellAppearanceStatePayload());
+
+  ipcMain.handle("desktop:update-theme-mode", (_event, themeMode: unknown) => {
+    if (!isShellThemeMode(themeMode)) {
+      throw new Error("界面主题参数不合法。");
+    }
+
+    return updateShellThemeMode(themeMode);
+  });
+
+  ipcMain.handle("desktop:hide-control-panel", () => {
+    hideControlWindow();
+    return true;
+  });
+
+  ipcMain.handle("desktop:show-pet", () => {
+    showPetWindow();
+    return true;
+  });
+
+  ipcMain.handle("desktop:hide-pet", () => {
+    hidePetWindow();
     return true;
   });
 
@@ -2737,6 +3851,73 @@ const createFloatWindow = () => {
   return window;
 };
 
+const createClipboardWindow = () => {
+  const preloadPath = join(currentDir, "preload.cjs");
+
+  const window = new BrowserWindow({
+    ...clipboardWindowSize,
+    center: false,
+    frame: false,
+    transparent: false,
+    hasShadow: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    backgroundColor: getClipboardWindowBackgroundColor(),
+    title: "桌宠 AI 剪贴板",
+    show: false,
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: preloadPath,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  window.setAlwaysOnTop(true, "floating");
+  window.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+  });
+  window.once("ready-to-show", () => {
+    positionClipboardWindow(window);
+  });
+
+  attachWindowDiagnostics(window, "clipboard");
+  window.on("blur", () => {
+    if (!window.isDestroyed() && !clipboardPanelPinned) {
+      window.hide();
+      refreshStatusItemMenu();
+    }
+  });
+  window.on("show", () => {
+    window.webContents.send("clipboard:state-changed", buildClipboardStatePayload());
+    window.webContents.send(
+      "desktop:appearance-changed",
+      buildShellAppearanceStatePayload(),
+    );
+    refreshStatusItemMenu();
+  });
+  window.on("hide", () => {
+    refreshStatusItemMenu();
+  });
+  window.on("move", () => {
+    persistClipboardWindowPosition(window);
+  });
+  window.on("closed", () => {
+    if (clipboardWindow === window) {
+      clipboardWindow = null;
+    }
+
+    refreshStatusItemMenu();
+  });
+
+  loadRenderer(window, "clipboard");
+  return window;
+};
+
 const createControlWindow = () => {
   const preloadPath = join(currentDir, "preload.cjs");
 
@@ -2753,7 +3934,7 @@ const createControlWindow = () => {
     fullscreenable: true,
     skipTaskbar: false,
     alwaysOnTop: false,
-    backgroundColor: "#f6e7c5",
+    backgroundColor: getControlWindowBackgroundColor(),
     title: "桌宠 AI 控制台",
     show: false,
     autoHideMenuBar: false,
@@ -2786,11 +3967,23 @@ const createControlWindow = () => {
 app.whenReady().then(async () => {
   configureMacApplicationShell();
   createStatusItem();
+  loadDesktopShellState();
+  nativeTheme.on("updated", () => {
+    if (shellThemeMode !== "system") {
+      return;
+    }
+
+    syncWindowBackgroundColors();
+    broadcastShellAppearanceState();
+  });
   startDesktopRuntimeStateSync();
+  startClipboardMonitor();
   await ensureLocalServiceReady();
   registerIpcHandlers();
+  ensureClipboardShortcutRegistered();
   petWindow = createPetWindow();
   floatWindow = createFloatWindow();
+  syncWindowBackgroundColors();
 
   if (openControlPanelOnLaunch) {
     showControlWindow();
@@ -2811,6 +4004,8 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   clearPersistTimer();
   stopDesktopRuntimeStateSync();
+  stopClipboardMonitor();
+  globalShortcut.unregisterAll();
   statusItem?.destroy();
   statusItem = null;
   stopManagedLocalService();
@@ -2822,7 +4017,24 @@ app.on("before-quit", () => {
   ipcMain.removeHandler("pet-window:cancel-motion");
   ipcMain.removeHandler("pet-window:set-layout-mode");
   ipcMain.removeHandler("pet-window:set-ignore-mouse-events");
+  ipcMain.removeHandler("float-window:show");
+  ipcMain.removeHandler("float-window:hide");
+  ipcMain.removeHandler("float-window:resize");
+  ipcMain.removeHandler("clipboard:get-state");
+  ipcMain.removeHandler("clipboard:show-panel");
+  ipcMain.removeHandler("clipboard:hide-panel");
+  ipcMain.removeHandler("clipboard:toggle-panel-pinned");
+  ipcMain.removeHandler("clipboard:update-shortcut");
+  ipcMain.removeHandler("clipboard:write-history-item");
+  ipcMain.removeHandler("clipboard:toggle-pinned");
+  ipcMain.removeHandler("clipboard:delete-history-item");
+  ipcMain.removeHandler("clipboard:clear-history");
   ipcMain.removeHandler("desktop:open-control-panel");
+  ipcMain.removeHandler("desktop:get-appearance");
+  ipcMain.removeHandler("desktop:update-theme-mode");
+  ipcMain.removeHandler("desktop:hide-control-panel");
+  ipcMain.removeHandler("desktop:show-pet");
+  ipcMain.removeHandler("desktop:hide-pet");
   ipcMain.removeHandler("desktop:show-pet-context-menu");
   ipcMain.removeHandler("desktop:quit-app");
   ipcMain.removeHandler("desktop:request-accessibility-permission");

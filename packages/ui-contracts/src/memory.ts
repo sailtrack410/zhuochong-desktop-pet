@@ -61,6 +61,56 @@ export const diaryGetResultSchema = createContractResultSchema(
   diaryEntrySchema.nullable(),
 );
 
+export const companionEventTypeSchema = z.enum([
+  "random_event",
+  "care_action",
+  "chat_affinity",
+]);
+
+export const companionEventRecordRequestSchema = z.object({
+  type: companionEventTypeSchema,
+  title: z.string().min(1),
+  description: z.string().min(1),
+  relationStage: z.string().min(1),
+  affinityDelta: z.number().int().min(-2).max(2).optional(),
+  occurredAt: z.string().datetime().optional(),
+});
+
+export const companionEventRecordResponseSchema = z.object({
+  memories: z.array(memoryRecordSchema),
+  diary: diaryEntrySchema,
+});
+
+export const companionEventRecordResultSchema = createContractResultSchema(
+  companionEventRecordResponseSchema,
+);
+
+export const companionProfileSummarySchema = z.object({
+  petName: z.string().min(1),
+  relationStage: z.string().min(1),
+  summaryText: z.string(),
+  highlights: z.array(z.string()),
+  generatedAt: z.string().datetime(),
+});
+
+export const companionProfileSummaryResultSchema = createContractResultSchema(
+  companionProfileSummarySchema,
+);
+
+export const explicitMemoryRememberRequestSchema = z.object({
+  text: z.string().min(1),
+  category: z.enum(["preference", "profile"]).optional(),
+});
+
+export const explicitMemoryRememberResponseSchema = z.object({
+  memory: memoryRecordSchema,
+});
+
+export const explicitMemoryRememberResultSchema = createContractResultSchema(
+  explicitMemoryRememberResponseSchema,
+);
+
+
 export type MemoryCategory = z.infer<typeof memoryCategorySchema>;
 export type MemoryRecordDto = z.infer<typeof memoryRecordSchema>;
 export type MemoryListQuery = z.infer<typeof memoryListQuerySchema>;
@@ -74,3 +124,19 @@ export type DiaryListDto = {
   entries: DiaryEntryDto[];
 };
 export type DiaryGetQuery = z.infer<typeof diaryGetQuerySchema>;
+export type CompanionEventType = z.infer<typeof companionEventTypeSchema>;
+export type CompanionEventRecordRequest = z.infer<
+  typeof companionEventRecordRequestSchema
+>;
+export type CompanionEventRecordResponse = z.infer<
+  typeof companionEventRecordResponseSchema
+>;
+export type CompanionProfileSummaryDto = z.infer<
+  typeof companionProfileSummarySchema
+>;
+export type ExplicitMemoryRememberRequest = z.infer<
+  typeof explicitMemoryRememberRequestSchema
+>;
+export type ExplicitMemoryRememberResponse = z.infer<
+  typeof explicitMemoryRememberResponseSchema
+>;
