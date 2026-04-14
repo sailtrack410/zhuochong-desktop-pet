@@ -9,10 +9,12 @@ import type {
   ReminderRecord,
   SettingsPatch,
 } from "../domain/models.js";
+import type { ChatSessionStatsDto } from "@zhuochong/ui-contracts";
 
 export interface ConversationRepository {
   getOrCreateActiveSession(): Promise<ConversationSession>;
   createNewSession(): Promise<ConversationSession>;
+  setActiveSession(sessionId: string): Promise<ConversationSession | null>;
   listSessions(params: { limit: number }): Promise<ConversationSession[]>;
   archiveSession(sessionId: string): Promise<void>;
   appendMessage(message: ConversationMessage): Promise<void>;
@@ -26,7 +28,7 @@ export interface ConversationRepository {
     limit: number;
   }): Promise<ConversationMessage[]>;
   touchSession(sessionId: string, lastMessageAt: string): Promise<void>;
-  getSessionStats(sessionId: string): Promise<{ messageCount: number; userTokens: number; assistantTokens: number }>;
+  getSessionStats(sessionId: string): Promise<ChatSessionStatsDto>;
 }
 
 export interface SettingsRepository {

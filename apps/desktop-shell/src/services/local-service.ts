@@ -1,12 +1,20 @@
 import { z } from "zod";
 
 import {
+  companionEventRecordRequestSchema,
+  companionEventRecordResultSchema,
+  companionProfileSummaryResultSchema,
+  explicitMemoryRememberRequestSchema,
+  explicitMemoryRememberResultSchema,
   chatAppendMessageRequestSchema,
   chatAppendMessageResponseSchema,
   chatAppendMessageResultSchema,
   chatHistoryQuerySchema,
   chatHistoryResultSchema,
+  chatSessionListResultSchema,
   chatSessionResultSchema,
+  chatSessionStatsResultSchema,
+  chatSessionSwitchRequestSchema,
   diaryGetQuerySchema,
   diaryListQuerySchema,
   diaryListResultSchema,
@@ -23,11 +31,19 @@ import {
   settingsResultSchema,
   settingsUpdateRequestSchema,
   createContractResultSchema,
+  type CompanionEventRecordRequest,
+  type CompanionEventRecordResponse,
+  type CompanionProfileSummaryDto,
+  type ExplicitMemoryRememberRequest,
+  type ExplicitMemoryRememberResponse,
   type ChatAppendMessageRequest,
   type ChatAppendMessageResponse,
   type ChatHistoryDto,
   type ChatHistoryQuery,
+  type ChatSessionListDto,
   type ChatSessionDto,
+  type ChatSessionStatsDto,
+  type ChatSessionSwitchRequest,
   type DiaryEntryDto,
   type DiaryListDto,
   type DiaryGetQuery,
@@ -162,10 +178,29 @@ const unwrapContract = <TData>(
   return parsed.data.data as TData;
 };
 
-const formatSessionId = (sessionId: string): string =>
+export const formatSessionId = (sessionId: string): string =>
   sessionId.length > 14
     ? `${sessionId.slice(0, 8)}…${sessionId.slice(-4)}`
     : sessionId;
+
+const createContractFailureResultSchema = () =>
+  createContractResultSchema(z.unknown());
+
+const unwrapErrorContractMessage = async (
+  response: Response,
+  endpoint: string,
+  fallbackMessage: string,
+): Promise<never> => {
+  const payload = await response.json().catch(() => null);
+  const failureResultSchema = createContractFailureResultSchema();
+  const parsed = failureResultSchema.safeParse(payload);
+
+  if (parsed.success && !parsed.data.ok) {
+    throw new Error(parsed.data.error.message);
+  }
+
+  throw new Error(fallbackMessage || `${endpoint} 请求失败。`);
+};
 
 const parseSettledContract = <TData>(
   settled: PromiseSettledResult<unknown>,
@@ -373,29 +408,67 @@ export const desktopLocalService = {
     );
   },
 
-  async getSessionStats(sessionId: string): Promise<{ messageCount: number; userTokens: number; assistantTokens: number }> {
+  async listChatSessions(limit = 20): Promise<ChatSessionListDto> {
+    const params = new URLSearchParams({
+      limit: String(limit),
+    });
+    const response = await fetch(
+      `${getLocalServiceBaseUrl()}/chat/sessions?${params.toString()}`,
+    );
+
+    if (!response.ok) {
+      throw new Error("获取会话列表失败。");
+    }
+
+    return unwrapContract<ChatSessionListDto>(
+      await response.json(),
+      chatSessionListResultSchema,
+      "chat/sessions",
+    );
+  },
+
+  async switchChatSession(
+    request: ChatSessionSwitchRequest | { sessionId: string },
+  ): Promise<ChatSessionDto> {
+    const payload = chatSessionSwitchRequestSchema.parse(request);
+    const response = await fetch(`${getLocalServiceBaseUrl()}/chat/session/switch`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      await unwrapErrorContractMessage(
+        response,
+        "chat/session/switch",
+        "切换会话失败。",
+      );
+    }
+
+    return unwrapContract<ChatSessionDto>(
+      await response.json(),
+      chatSessionResultSchema,
+      "chat/session/switch",
+    );
+  },
+
+  async getSessionStats(sessionId: string): Promise<ChatSessionStatsDto> {
     const params = new URLSearchParams({ sessionId });
     const response = await fetch(`${getLocalServiceBaseUrl()}/chat/session/stats?${params.toString()}`);
 
     if (!response.ok) {
-      throw new Error("获取会话统计失败。");
+      await unwrapErrorContractMessage(
+        response,
+        "chat/session/stats",
+        "获取会话统计失败。",
+      );
     }
 
-    const resultSchema = z.object({
-      ok: z.literal(true),
-      data: z.object({
-        messageCount: z.number(),
-        userTokens: z.number(),
-        assistantTokens: z.number(),
-      }),
-      meta: z.object({
-        requestId: z.string(),
-      }).optional(),
-    });
-
-    return unwrapContract(
+    return unwrapContract<ChatSessionStatsDto>(
       await response.json(),
-      resultSchema,
+      chatSessionStatsResultSchema,
       "chat/session/stats",
     );
   },
@@ -573,12 +646,86 @@ export const desktopLocalService = {
     );
   },
 
-  async getMemoryList(query?: MemoryListQuery): Promise<MemoryListDto> {
-    const bridge = getBridge();
-    if (!bridge) {
-      throw new Error("Desktop bridge 不可用，无法读取记忆列表。");
+  async rememberExplicitMemory(
+    request: ExplicitMemoryRememberRequest,
+  ): Promise<ExplicitMemoryRememberResponse> {
+    const payload = explicitMemoryRememberRequestSchema.parse(request);
+    const response = await fetch(
+      `${getLocalServiceBaseUrl()}/memory/remember`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+
+    if (!response.ok) {
+      await unwrapErrorContractMessage(
+        response,
+        "memory/remember",
+        "保存记忆失败。",
+      );
     }
 
+    return unwrapContract<ExplicitMemoryRememberResponse>(
+      await response.json(),
+      explicitMemoryRememberResultSchema,
+      "memory/remember",
+    );
+  },
+
+  async recordCompanionEvent(
+    request: CompanionEventRecordRequest,
+  ): Promise<CompanionEventRecordResponse> {
+    const payload = companionEventRecordRequestSchema.parse(request);
+    const response = await fetch(
+      `${getLocalServiceBaseUrl()}/memory/companion-event`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+
+    if (!response.ok) {
+      await unwrapErrorContractMessage(
+        response,
+        "memory/companion-event",
+        "记录陪伴事件失败。",
+      );
+    }
+
+    return unwrapContract<CompanionEventRecordResponse>(
+      await response.json(),
+      companionEventRecordResultSchema,
+      "memory/companion-event",
+    );
+  },
+
+  async getCompanionProfileSummary(): Promise<CompanionProfileSummaryDto> {
+    const response = await fetch(
+      `${getLocalServiceBaseUrl()}/memory/profile-summary`,
+    );
+    if (!response.ok) {
+      await unwrapErrorContractMessage(
+        response,
+        "memory/profile-summary",
+        "获取陪伴摘要失败。",
+      );
+    }
+
+    return unwrapContract<CompanionProfileSummaryDto>(
+      await response.json(),
+      companionProfileSummaryResultSchema,
+      "memory/profile-summary",
+    );
+  },
+
+  async getMemoryList(query?: MemoryListQuery): Promise<MemoryListDto> {
     const parsed = memoryListQuerySchema.safeParse(query ?? {});
     if (!parsed.success) {
       throw new Error("记忆列表查询参数无效。");
@@ -595,7 +742,11 @@ export const desktopLocalService = {
     const url = `${getLocalServiceBaseUrl()}/memory/list?${params.toString()}`;
     const response = await fetch(url);
     if (!response.ok) {
-      throw new Error("获取记忆列表失败。");
+      await unwrapErrorContractMessage(
+        response,
+        "memory/list",
+        "获取记忆列表失败。",
+      );
     }
 
     return unwrapContract<MemoryListDto>(
@@ -606,11 +757,6 @@ export const desktopLocalService = {
   },
 
   async getDiaryList(limit?: number): Promise<DiaryListDto> {
-    const bridge = getBridge();
-    if (!bridge) {
-      throw new Error("Desktop bridge 不可用，无法读取日记列表。");
-    }
-
     const parsed = diaryListQuerySchema.safeParse({ limit });
     if (!parsed.success) {
       throw new Error("日记列表查询参数无效。");
@@ -624,7 +770,11 @@ export const desktopLocalService = {
     const url = `${getLocalServiceBaseUrl()}/diary/list?${params.toString()}`;
     const response = await fetch(url);
     if (!response.ok) {
-      throw new Error("获取日记列表失败。");
+      await unwrapErrorContractMessage(
+        response,
+        "diary/list",
+        "获取日记列表失败。",
+      );
     }
 
     return unwrapContract<DiaryListDto>(
@@ -635,11 +785,6 @@ export const desktopLocalService = {
   },
 
   async getDiaryByDate(query: DiaryGetQuery): Promise<DiaryEntryDto | null> {
-    const bridge = getBridge();
-    if (!bridge) {
-      throw new Error("Desktop bridge 不可用，无法读取日记。");
-    }
-
     const parsed = diaryGetQuerySchema.safeParse(query);
     if (!parsed.success) {
       throw new Error("日记查询参数无效。");
@@ -652,7 +797,11 @@ export const desktopLocalService = {
     const url = `${getLocalServiceBaseUrl()}/diary/get?${params.toString()}`;
     const response = await fetch(url);
     if (!response.ok) {
-      throw new Error("获取日记失败。");
+      await unwrapErrorContractMessage(
+        response,
+        "diary/get",
+        "获取日记失败。",
+      );
     }
 
     return unwrapContract<DiaryEntryDto | null>(

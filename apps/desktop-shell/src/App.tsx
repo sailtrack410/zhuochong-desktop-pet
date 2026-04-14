@@ -11,14 +11,17 @@ import {
 
 import type {
   ChatMessageDto,
+  ChatSessionDto,
+  CompanionProfileSummaryDto,
   DiaryEntryDto,
   MemoryRecordDto,
+  ReminderRecordDto,
   ReminderRuntimeStatusDto,
   SettingsDto,
   SettingsUpdateRequest,
 } from "@zhuochong/ui-contracts";
 
-import { desktopLocalService } from "./services/local-service.js";
+import { desktopLocalService, formatSessionId } from "./services/local-service.js";
 import {
   publishComposerActivity,
   subscribeComposerActivity,
@@ -34,6 +37,21 @@ import {
   publishPetSettingsUpdate,
   subscribePetSettingsUpdates,
 } from "./settings/pet-settings-sync.js";
+import {
+  clearPanelTabRequest,
+  consumePanelTabRequest,
+  subscribePanelTabRequests,
+} from "./panel/panel-tab-sync.js";
+
+export type PanelTab = "chat" | "memory" | "settings" | "status";
+
+import { ClipboardPalette } from "./clipboard/clipboard-palette.js";
+import {
+  defaultClipboardAccelerator,
+  formatAcceleratorLabel,
+  getAcceleratorFromKeyEvent,
+} from "./clipboard/shortcut.js";
+import { useShellAppearance } from "./appearance/use-shell-appearance.js";
 
 const speechBubbleDurationMs = 5_400;
 const petComposerMinHeight = 30;
@@ -43,15 +61,24 @@ const petComposerMaxWidth = 320;
 const recentReminderNotificationWindowMs = 20_000;
 
 const formatSessionLabel = (sessionId?: string) =>
-  sessionId
-    ? `${sessionId.slice(0, 8)}…${sessionId.slice(-4)}`
-    : "未分配";
+  sessionId ? formatSessionId(sessionId) : "未分配";
 
 const formatMessageTime = (value: string) =>
   new Date(value).toLocaleTimeString("zh-CN", {
     hour: "2-digit",
     minute: "2-digit",
   });
+
+const formatSessionTime = (value: string) =>
+  new Date(value).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+const getSessionStatusLabel = (status: ChatSessionDto["status"]) =>
+  status === "active" ? "当前" : "历史";
 
 const formatRuntimeCheckedAt = (value: string) =>
   new Date(value).toLocaleTimeString("zh-CN", {
@@ -134,6 +161,38 @@ const getComposerAutoHideHint = (
   value: SettingsDto["pet"]["composerAutoHideSeconds"],
 ) => `展开后无输入、无回复时，约 ${value} 秒自动收起。`;
 
+const getThemeModeHint = (
+  themeMode: ZhuochongShellAppearanceMode,
+  resolvedTheme: ZhuochongShellResolvedTheme,
+) => {
+  if (themeMode === "system") {
+    return `跟随 mac 系统外观，当前会按${resolvedTheme === "dark" ? "深色" : "浅色"}显示。`;
+  }
+
+  if (themeMode === "dark") {
+    return "始终使用深色界面，不跟随系统切换。";
+  }
+
+  return "始终使用浅色界面，不跟随系统切换。";
+};
+
+const getMetricToneLabel = (tone: "meal" | "energy" | "heart" | "health") => {
+  if (tone === "meal") {
+    return "饮食";
+  }
+
+  if (tone === "energy") {
+    return "状态";
+  }
+
+  if (tone === "heart") {
+    return "关系";
+  }
+
+  return "健康";
+};
+
+
 const reminderSilentReasonLabels: Record<
   ReminderRuntimeStatusDto["activeSilentReasons"][number],
   string
@@ -148,12 +207,24 @@ type ReminderRuntimeView = {
   detail: string;
 };
 
+const handleClipboardSubscriptionState = (
+  nextState: ZhuochongClipboardState,
+  setClipboardState: (value: ZhuochongClipboardState) => void,
+  setClipboardShortcutDraft: (value: string) => void,
+) => {
+  setClipboardState(nextState);
+  setClipboardShortcutDraft(nextState.shortcut.accelerator);
+};
+
 const getPresentationMode = () => {
   const mode = new URLSearchParams(window.location.search).get("mode");
   if (mode === "panel") return "panel";
   if (mode === "float") return "float";
+  if (mode === "clipboard") return "clipboard";
   return "pet";
 };
+
+type PresentationMode = ReturnType<typeof getPresentationMode>;
 
 const getAuthorLabel = (
   role: ChatMessageDto["role"],
@@ -184,15 +255,38 @@ const findLatestMessage = (
   return null;
 };
 
-const isRecentReminderMessage = (
+const evaluateChatAffinityMessage = (message: ChatMessageDto) =>
+  message.role === "user" && message.source === "chat";
+
+const isProactiveReminderMessage = (
   message: ChatMessageDto,
-  nowMs: number,
+  reminderRecords: Map<string, ReminderRecordDto>,
 ) => {
-  const createdAtMs = Date.parse(message.createdAt);
+  if (message.source !== "reminder" || !message.relatedReminderId) {
+    return false;
+  }
+
+  const reminder = reminderRecords.get(message.relatedReminderId);
+  if (!reminder) {
+    return true;
+  }
+
   return (
-    Number.isFinite(createdAtMs) &&
-    nowMs - createdAtMs <= recentReminderNotificationWindowMs
+    reminder.source === "time" ||
+    reminder.source === "idle" ||
+    reminder.source === "battery"
   );
+};
+
+const shouldRenderChatMessage = (
+  message: ChatMessageDto,
+  reminderRecords: Map<string, ReminderRecordDto>,
+) => {
+  if (message.source !== "reminder") {
+    return true;
+  }
+
+  return !isProactiveReminderMessage(message, reminderRecords);
 };
 
 const getLongestLine = (value: string) =>
@@ -233,28 +327,40 @@ const extractPetRuntimeSettings = (
     defaultPetRuntimeSettings.composerAutoHideSeconds,
 });
 
-export const App = () => {
-  const presentationMode = getPresentationMode();
+const MainApp = ({
+  presentationMode,
+}: {
+  presentationMode: Exclude<PresentationMode, "clipboard">;
+}) => {
   const isPanelMode = presentationMode === "panel";
   const isFloatMode = presentationMode === "float";
   const isPetMode = presentationMode === "pet";
+  const { appearance } = useShellAppearance();
   const [petRuntimeSettings, setPetRuntimeSettings] = useState<PetRuntimeSettings>(
     defaultPetRuntimeSettings,
   );
   const {
+    actionAvailability,
+    affinityCooldownRemainingMs,
+    affinityStage,
     consumePetClick,
     currentAsset,
+    dragHint,
+    eventLogs,
     facingDirection,
+    feedPet,
     handlePointerCancel,
     handlePointerDown,
     handlePointerMove,
     handlePointerUp,
+    handleChatAffinity,
     isDragging,
+    metrics,
     petName,
     pixelScale,
-    runtimeVersion,
-    serviceLevel,
-    serviceLabel,
+    playWithPet,
+    resources,
+    restPet,
     statusText,
     visualState,
     wanderRandomly,
@@ -271,25 +377,31 @@ export const App = () => {
     createNewSession,
     draft,
     getSessionStats,
+    historyHasMore,
+    historyLoadingMore,
     isLoading,
     isSending,
+    loadOlderMessages,
     messages,
-    quickPrompts,
-    reloadConversation,
     sendMessage,
     sendErrorText,
+    sessions,
+    sessionsLoading,
     setDraft,
     setStreamingTextRef,
     streamingAssistantText,
     streamingPhase,
+    switchSession,
+    switchingSessionId,
   } = useChatPanel();
 
   const panelComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const petComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const petComposerMeasureRef = useRef<HTMLSpanElement | null>(null);
+  const clipboardShortcutInputRef = useRef<HTMLInputElement | null>(null);
   const floatContainerRef = useRef<HTMLElement | null>(null);
   const lastAssistantMessageIdRef = useRef<string | null>(null);
-  const hasPrimedLatestAssistantRef = useRef(false);
+  const lastUserMessageIdRef = useRef<string | null>(null);
   const speechTimerRef = useRef<number | null>(null);
   const composerAutoHideTimerRef = useRef<number | null>(null);
   const ambientMoveTimerRef = useRef<number | null>(null);
@@ -324,6 +436,9 @@ export const App = () => {
   const [acknowledgedReminderIds, setAcknowledgedReminderIds] = useState<
     Set<string>
   >(new Set());
+  const [reminderRecordsById, setReminderRecordsById] = useState(
+    () => new Map<string, ReminderRecordDto>(),
+  );
 
   const latestAssistantMessage = useMemo(
     () => findLatestMessage(messages, "assistant"),
@@ -381,13 +496,31 @@ export const App = () => {
   }, []);
 
   useEffect(() => {
-    if (isPanelMode || isLoading || hasPrimedLatestAssistantRef.current) {
+    const latestUserChatMessage = [...messages]
+      .reverse()
+      .find((message) => evaluateChatAffinityMessage(message));
+
+    if (!latestUserChatMessage) {
       return;
     }
 
-    lastAssistantMessageIdRef.current = latestAssistantMessage?.messageId ?? "__none__";
-    hasPrimedLatestAssistantRef.current = true;
-  }, [isLoading, isPanelMode, latestAssistantMessage]);
+    if (lastUserMessageIdRef.current === latestUserChatMessage.messageId) {
+      return;
+    }
+
+    lastUserMessageIdRef.current = latestUserChatMessage.messageId;
+    const result = handleChatAffinity(latestUserChatMessage.text);
+    if (result.delta !== 0) {
+      setSpeechBubbleText(result.reason);
+      if (speechTimerRef.current !== null) {
+        window.clearTimeout(speechTimerRef.current);
+      }
+      speechTimerRef.current = window.setTimeout(() => {
+        speechTimerRef.current = null;
+        setSpeechBubbleText(null);
+      }, 3_800);
+    }
+  }, [handleChatAffinity, messages]);
 
   useEffect(() => {
     if (
@@ -448,7 +581,12 @@ export const App = () => {
 
       notifiedReminderIdsRef.current.add(message.relatedReminderId);
 
-      if (isRecentReminderMessage(message, nowMs)) {
+      if (isProactiveReminderMessage(message, reminderRecordsById)) {
+        continue;
+      }
+
+      const createdAtMs = Date.parse(message.createdAt);
+      if (Number.isFinite(createdAtMs) && nowMs - createdAtMs <= recentReminderNotificationWindowMs) {
         recentReminderMessages.push(message);
       }
     }
@@ -462,7 +600,7 @@ export const App = () => {
         body: message.text,
       });
     }
-  }, [isLoading, messages, petName]);
+  }, [isLoading, messages, petName, reminderRecordsById]);
 
   useEffect(() => {
     if (isLoading || !hasPrimedReminderNotificationsRef.current) {
@@ -479,13 +617,17 @@ export const App = () => {
       }
 
       notifiedReminderIdsRef.current.add(message.relatedReminderId);
+      if (isProactiveReminderMessage(message, reminderRecordsById)) {
+        continue;
+      }
+
       void window.zhuochong?.desktop.showSystemNotification?.({
         notificationId: message.relatedReminderId,
         title: `${petName} 提醒`,
         body: message.text,
       });
     }
-  }, [isLoading, messages, petName]);
+  }, [isLoading, messages, petName, reminderRecordsById]);
 
   useEffect(() => {
     if (isPanelMode || !sendErrorText) {
@@ -884,13 +1026,10 @@ export const App = () => {
     });
   };
 
-  const panelSectionNote = activeSession
-    ? `当前会话 ${formatSessionLabel(activeSession.sessionId)}`
-    : "这里是完整对话历史";
 
-  // 控制台标签页状态
-  type PanelTab = "chat" | "memory" | "settings";
-  const [activePanelTab, setActivePanelTab] = useState<PanelTab>("chat");
+  const [activePanelTab, setActivePanelTab] = useState<PanelTab>(() =>
+    isPanelMode ? consumePanelTabRequest("chat") : "chat",
+  );
 
   // 设置页状态
   const [settings, setSettings] = useState<SettingsDto | null>(null);
@@ -907,6 +1046,31 @@ export const App = () => {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
+  const [clipboardState, setClipboardState] =
+    useState<ZhuochongClipboardState | null>(null);
+  const [clipboardLoading, setClipboardLoading] = useState(false);
+  const [clipboardShortcutDraft, setClipboardShortcutDraft] = useState(
+    defaultClipboardAccelerator,
+  );
+  const [themeModeDraft, setThemeModeDraft] =
+    useState<ZhuochongShellAppearanceMode>("system");
+  const [isRecordingClipboardShortcut, setIsRecordingClipboardShortcut] =
+    useState(false);
+
+  useEffect(() => {
+    setThemeModeDraft(appearance.themeMode);
+  }, [appearance.themeMode]);
+
+  useEffect(() => {
+    if (!isPanelMode) {
+      return;
+    }
+
+    return subscribePanelTabRequests((nextTab) => {
+      setActivePanelTab(nextTab);
+      clearPanelTabRequest();
+    });
+  }, [isPanelMode]);
 
   // 加载设置
   const loadSettings = async () => {
@@ -920,6 +1084,34 @@ export const App = () => {
       setSettingsMessageType("error");
     } finally {
       setSettingsLoading(false);
+    }
+  };
+
+  const loadClipboardState = async (options?: {
+    quiet?: boolean;
+  }) => {
+    if (!options?.quiet) {
+      setClipboardLoading(true);
+    }
+
+    try {
+      const data = await window.zhuochong?.clipboard?.getState?.();
+      if (!data) {
+        throw new Error("剪贴板工具暂时不可用。");
+      }
+
+      setClipboardState(data);
+      setClipboardShortcutDraft(data.shortcut.accelerator);
+    } catch (error) {
+      setClipboardState(null);
+      setSettingsMessage(
+        error instanceof Error ? error.message : "读取剪贴板设置失败",
+      );
+      setSettingsMessageType("error");
+    } finally {
+      if (!options?.quiet) {
+        setClipboardLoading(false);
+      }
     }
   };
 
@@ -977,15 +1169,93 @@ export const App = () => {
       setSettings(updated);
       setPetRuntimeSettings(extractPetRuntimeSettings(updated));
       setApiKeyInput("");
-      publishPetSettingsUpdate({
-        ...updated.pet,
+      const syncedPetSettings = {
+        displayName: updated.pet.displayName,
+        pixelScale: updated.pet.pixelScale,
+        motionFrequency: updated.pet.motionFrequency,
+        sleepTendency: updated.pet.sleepTendency,
+        moveDistance: updated.pet.moveDistance,
+        composerAutoHideSeconds: updated.pet.composerAutoHideSeconds,
         proactivityLevel: updated.behavior.proactivityLevel,
-      });
+      };
+      publishPetSettingsUpdate(syncedPetSettings);
       void loadReminderRuntimeStatus({
         quiet: true,
       });
-      // 强制触发重新渲染
-      setSettingsMessage("设置已保存");
+
+      const partialFailures: string[] = [];
+      const partialSuccesses: string[] = [];
+      const currentClipboardAccelerator = clipboardState?.shortcut.accelerator;
+      const themeUpdateNeeded = themeModeDraft !== appearance.themeMode;
+      const shortcutUpdateNeeded =
+        Boolean(currentClipboardAccelerator) &&
+        Boolean(clipboardShortcutDraft.trim()) &&
+        clipboardShortcutDraft.trim() !== currentClipboardAccelerator;
+
+      const [themeResult, shortcutResult] = await Promise.allSettled([
+        themeUpdateNeeded
+          ? window.zhuochong?.desktop?.updateThemeMode?.(themeModeDraft)
+          : Promise.resolve(undefined),
+        shortcutUpdateNeeded
+          ? window.zhuochong?.clipboard?.updateShortcut?.(
+              clipboardShortcutDraft.trim(),
+            )
+          : Promise.resolve(undefined),
+      ]);
+
+      if (themeUpdateNeeded) {
+        if (themeResult.status === "fulfilled" && themeResult.value) {
+          partialSuccesses.push("界面主题已更新");
+        } else {
+          partialFailures.push(
+            `界面主题没有更新：${
+              themeResult.status === "rejected"
+                ? themeResult.reason instanceof Error
+                  ? themeResult.reason.message
+                  : "更新失败"
+                : "界面主题桥接不可用。"
+            }`,
+          );
+        }
+      }
+
+      if (shortcutUpdateNeeded) {
+        if (shortcutResult.status === "fulfilled" && shortcutResult.value) {
+          handleClipboardSubscriptionState(
+            shortcutResult.value,
+            setClipboardState,
+            setClipboardShortcutDraft,
+          );
+          partialSuccesses.push("剪贴板快捷键已更新");
+        } else {
+          await loadClipboardState({
+            quiet: true,
+          });
+          partialFailures.push(
+            `剪贴板快捷键没有更新：${
+              shortcutResult.status === "rejected"
+                ? shortcutResult.reason instanceof Error
+                  ? shortcutResult.reason.message
+                  : "注册失败"
+                : "剪贴板快捷键桥接不可用。"
+            }`,
+          );
+        }
+      }
+
+      if (partialFailures.length > 0) {
+        setSettingsMessage(`其他设置已保存，但${partialFailures.join("；")}`);
+        setSettingsMessageType("error");
+        window.setTimeout(() => setSettingsMessage(null), 5000);
+        return;
+      }
+
+      const successMessage =
+        partialSuccesses.length > 0
+          ? `设置已保存，${partialSuccesses.join("，")}`
+          : "设置已保存";
+
+      setSettingsMessage(successMessage);
       setSettingsMessageType("success");
       window.setTimeout(() => setSettingsMessage(null), 3000);
     } catch (error) {
@@ -1038,24 +1308,130 @@ export const App = () => {
     }
   };
 
+  const startClipboardShortcutRecording = () => {
+    setIsRecordingClipboardShortcut(true);
+    window.requestAnimationFrame(() => {
+      clipboardShortcutInputRef.current?.focus();
+      clipboardShortcutInputRef.current?.select();
+    });
+  };
+
+  const stopClipboardShortcutRecording = () => {
+    setIsRecordingClipboardShortcut(false);
+  };
+
+  const handleClipboardShortcutKeyDown = (
+    event: KeyboardEvent<HTMLInputElement>,
+  ) => {
+    if (!isRecordingClipboardShortcut) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (event.key === "Escape") {
+      stopClipboardShortcutRecording();
+      return;
+    }
+
+    const nextAccelerator = getAcceleratorFromKeyEvent(event);
+    if (!nextAccelerator) {
+      return;
+    }
+
+    setClipboardShortcutDraft(nextAccelerator);
+    stopClipboardShortcutRecording();
+  };
+
   // 记忆/日记页状态
   const [memories, setMemories] = useState<MemoryRecordDto[]>([]);
   const [diaries, setDiaries] = useState<DiaryEntryDto[]>([]);
+  const [profileSummaryData, setProfileSummaryData] =
+    useState<CompanionProfileSummaryDto | null>(null);
   const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryLoadError, setMemoryLoadError] = useState<string | null>(null);
   const [activeMemoryTab, setActiveMemoryTab] = useState<"memories" | "diaries">("diaries");
+  const [memoryCategoryFilter, setMemoryCategoryFilter] = useState<
+    "all" | MemoryRecordDto["category"]
+  >("all");
+  const [memorySortMode, setMemorySortMode] = useState<"recent" | "confidence">(
+    "recent",
+  );
+  const [collapsedMemoryGroups, setCollapsedMemoryGroups] = useState<
+    Partial<Record<MemoryRecordDto["category"] | "other", boolean>>
+  >({});
+
+  const loadProfileSummaryData = async () => {
+    try {
+      const profileSummary = await desktopLocalService.getCompanionProfileSummary();
+      setProfileSummaryData(profileSummary);
+      setMemoryLoadError((current) =>
+        current === "陪伴记录暂时不可用，请稍后再试。" ? null : current,
+      );
+      return profileSummary;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "获取陪伴摘要失败。";
+      setMemoryLoadError((current) => current ?? message);
+      return null;
+    }
+  };
 
   // 加载记忆和日记
   const loadMemoryData = async () => {
     setMemoryLoading(true);
+    setMemoryLoadError(null);
     try {
-      const [memoryData, diaryData] = await Promise.all([
+      const [memoryResult, diaryResult, profileResult] = await Promise.allSettled([
         desktopLocalService.getMemoryList({ limit: 50 }),
         desktopLocalService.getDiaryList(7),
+        desktopLocalService.getCompanionProfileSummary(),
       ]);
-      setMemories(memoryData.memories);
-      setDiaries(diaryData.entries);
-    } catch (error) {
-      console.error("加载记忆数据失败:", error);
+
+      const nextErrors: string[] = [];
+
+      if (memoryResult.status === "fulfilled") {
+        setMemories(memoryResult.value.memories);
+      } else {
+        nextErrors.push(
+          memoryResult.reason instanceof Error
+            ? memoryResult.reason.message
+            : "获取记忆列表失败。",
+        );
+      }
+
+      if (diaryResult.status === "fulfilled") {
+        setDiaries(diaryResult.value.entries);
+      } else {
+        nextErrors.push(
+          diaryResult.reason instanceof Error
+            ? diaryResult.reason.message
+            : "获取日记列表失败。",
+        );
+      }
+
+      if (profileResult.status === "fulfilled") {
+        setProfileSummaryData(profileResult.value);
+      } else {
+        nextErrors.push(
+          profileResult.reason instanceof Error
+            ? profileResult.reason.message
+            : "获取陪伴摘要失败。",
+        );
+      }
+
+      if (nextErrors.length > 0) {
+        setMemoryLoadError(nextErrors[0] ?? "陪伴记录暂时不可用，请稍后再试。");
+      }
+
+      if (
+        memoryResult.status !== "fulfilled" &&
+        diaryResult.status !== "fulfilled" &&
+        profileResult.status !== "fulfilled"
+      ) {
+        setMemoryLoadError(nextErrors[0] ?? "陪伴记录暂时不可用，请稍后再试。");
+      }
     } finally {
       setMemoryLoading(false);
     }
@@ -1107,30 +1483,52 @@ export const App = () => {
   }, []);
 
   useEffect(() => {
-    if (isPanelMode && activePanelTab === "settings" && !settings) {
-      void loadSettings();
-    }
-    if (isPanelMode && activePanelTab === "memory") {
-      void loadMemoryData();
-    }
-  }, [isPanelMode, activePanelTab]);
-
-  useEffect(() => {
     if (!isPanelMode || activePanelTab !== "settings") {
       return;
     }
 
-    void loadReminderRuntimeStatus();
-    const timer = window.setInterval(() => {
-      void loadReminderRuntimeStatus({
-        quiet: true,
-      });
-    }, 5_000);
+    if (!settings) {
+      void loadSettings();
+    }
+
+    if (!clipboardState) {
+      void loadClipboardState();
+    }
+
+    const unsubscribeClipboard = window.zhuochong?.clipboard?.subscribeStateChanged?.(
+      (nextState) => {
+        handleClipboardSubscriptionState(
+          nextState,
+          setClipboardState,
+          setClipboardShortcutDraft,
+        );
+      },
+    );
 
     return () => {
-      window.clearInterval(timer);
+      unsubscribeClipboard?.();
     };
-  }, [isPanelMode, activePanelTab]);
+  }, [activePanelTab, clipboardState, isPanelMode, settings]);
+
+  useEffect(() => {
+    if (!isPanelMode || activePanelTab !== "memory") {
+      return;
+    }
+
+    void loadMemoryData();
+  }, [activePanelTab, isPanelMode]);
+
+  useEffect(() => {
+    if (!isPanelMode || activePanelTab !== "status") {
+      return;
+    }
+
+    if (profileSummaryData) {
+      return;
+    }
+
+    void loadProfileSummaryData();
+  }, [activePanelTab, isPanelMode, profileSummaryData]);
 
   // 会话变化时更新统计数据
   useEffect(() => {
@@ -1161,6 +1559,50 @@ export const App = () => {
     }
 
     const unresolvedReminderIds = reminderMessageIds.filter(
+      (reminderId) => !reminderRecordsById.get(reminderId),
+    );
+
+    if (unresolvedReminderIds.length === 0) {
+      return;
+    }
+
+    let disposed = false;
+
+    const loadReminderRecords = async () => {
+      try {
+        const result = await desktopLocalService.getReminderList({
+          limit: 200,
+        });
+
+        if (disposed) {
+          return;
+        }
+
+        setReminderRecordsById((current) => {
+          const next = new Map(current);
+          for (const reminder of result.reminders) {
+            next.set(reminder.reminderId, reminder);
+          }
+          return next;
+        });
+      } catch {
+        // Keep local reminder record cache when sync fails.
+      }
+    };
+
+    void loadReminderRecords();
+
+    return () => {
+      disposed = true;
+    };
+  }, [isPanelMode, reminderMessageIds, reminderRecordsById]);
+
+  useEffect(() => {
+    if (!isPanelMode || reminderMessageIds.length === 0) {
+      return;
+    }
+
+    const unresolvedReminderIds = reminderMessageIds.filter(
       (reminderId) => !acknowledgedReminderIds.has(reminderId),
     );
 
@@ -1179,6 +1621,14 @@ export const App = () => {
         if (disposed) {
           return;
         }
+
+        setReminderRecordsById((current) => {
+          const next = new Map(current);
+          for (const reminder of result.reminders) {
+            next.set(reminder.reminderId, reminder);
+          }
+          return next;
+        });
 
         const unresolvedSet = new Set(unresolvedReminderIds);
         const matchedIds = result.reminders
@@ -1221,6 +1671,94 @@ export const App = () => {
     });
   };
 
+  const getProfileToneLead = (stage: string) => {
+    if (stage === "亲密无间") {
+      return `${petName} 已经把你划进最熟悉的领地里，很多小反应都会优先朝你这边偏。`;
+    }
+
+    if (stage === "关系很好") {
+      return `${petName} 对你已经明显放松下来，遇到顺手的事也更愿意主动靠近。`;
+    }
+
+    if (stage === "逐渐熟悉") {
+      return `${petName} 正在慢慢摸清你的节奏，偶尔会主动把注意力放到你身上。`;
+    }
+
+    if (stage === "刚建立联系") {
+      return `${petName} 还在试着确认你的照料方式，但已经愿意留下第一批陪伴记录。`;
+    }
+
+    return `${petName} 还在观察你，很多反应都偏谨慎，图鉴信息也会长得比较慢。`;
+  };
+
+  const compactMemoryClue = (value: string) => {
+    const [head] = value.split(/[：:]/);
+    return (head || value).trim();
+  };
+
+  const joinSummaryParts = (parts: Array<string | null | undefined>) =>
+    parts.filter((part): part is string => Boolean(part && part.trim())).join("");
+
+  const getLatestMemoryByKey = (
+    memoryKey: string,
+  ) => memories.find((memory) => memory.key === memoryKey) ?? null;
+
+  const profileSummary = useMemo(
+    () => {
+      const currentStageMemory = getLatestMemoryByKey("当前关系阶段");
+      const relationChangeMemory = getLatestMemoryByKey("最近关系变化");
+      const careMemory = getLatestMemoryByKey("最近照料");
+      const eventMemory = getLatestMemoryByKey("最近随机事件");
+      const chatMemory = getLatestMemoryByKey("最近聊天");
+      const latestDiary = diaries[0] ?? null;
+      const resolvedStage = currentStageMemory?.valueText ?? affinityStage;
+
+      if (!latestDiary && memories.length === 0) {
+        return joinSummaryParts([
+          getProfileToneLead(resolvedStage),
+          `${petName} 还在继续积累陪伴记录，最近的互动会慢慢补全它对你的印象。`,
+        ]);
+      }
+
+      return joinSummaryParts([
+        getProfileToneLead(resolvedStage),
+        latestDiary?.diaryText,
+        latestDiary ? null : `它目前把你们的关系记作「${resolvedStage}」。`,
+        relationChangeMemory
+          ? `最近一次关系变化是：${relationChangeMemory.valueText}`
+          : null,
+        careMemory ? `它也记得你最近的照料：${careMemory.valueText}` : null,
+        !careMemory && eventMemory
+          ? `最近留下的事件印象是：${eventMemory.valueText}`
+          : null,
+        !careMemory && !eventMemory && chatMemory
+          ? `它最近记住的一段聊天是：${chatMemory.valueText}`
+          : null,
+      ]);
+    },
+    [affinityStage, diaries, memories, petName],
+  );
+
+  const profileHighlights = useMemo(() => {
+    const relationChangeMemory = getLatestMemoryByKey("最近关系变化");
+    const careMemory = getLatestMemoryByKey("最近照料");
+    const eventMemory = getLatestMemoryByKey("最近随机事件");
+    const chatMemory = getLatestMemoryByKey("最近聊天");
+
+    return [
+      ...(diaries[0]?.highlights ?? []).slice(0, 2),
+      relationChangeMemory ? compactMemoryClue(relationChangeMemory.valueText) : null,
+      careMemory ? compactMemoryClue(careMemory.valueText) : null,
+      eventMemory ? compactMemoryClue(eventMemory.valueText) : null,
+      !eventMemory && chatMemory ? compactMemoryClue(chatMemory.valueText) : null,
+    ]
+      .filter(
+        (value, index, array): value is string =>
+          Boolean(value) && array.indexOf(value) === index,
+      )
+      .slice(0, 4);
+  }, [diaries, memories]);
+
   const getCategoryLabel = (category: string) => {
     const labels: Record<string, string> = {
       preference: "偏好",
@@ -1230,6 +1768,66 @@ export const App = () => {
       relationship: "关系",
     };
     return labels[category] ?? category;
+  };
+
+  type MemoryGroupKey = MemoryRecordDto["category"] | "other";
+
+  type MemoryGroup = {
+    category: MemoryGroupKey;
+    title: string;
+    items: MemoryRecordDto[];
+  };
+
+  const groupedMemories = useMemo<MemoryGroup[]>(() => {
+    const categoryOrder: Array<MemoryRecordDto["category"]> = [
+      "profile",
+      "relationship",
+      "habit",
+      "event",
+      "preference",
+    ];
+    const filteredMemories =
+      memoryCategoryFilter === "all"
+        ? memories
+        : memories.filter((memory) => memory.category === memoryCategoryFilter);
+    const sortedMemories = [...filteredMemories].sort((left, right) => {
+      if (memorySortMode === "confidence") {
+        return right.confidence - left.confidence;
+      }
+
+      return (
+        Date.parse(right.lastConfirmedAt) - Date.parse(left.lastConfirmedAt)
+      );
+    });
+
+    const groups: MemoryGroup[] = categoryOrder
+      .map((category) => ({
+        category,
+        title: getCategoryLabel(category),
+        items: sortedMemories.filter((memory) => memory.category === category),
+      }))
+      .filter((group) => group.items.length > 0);
+
+    const uncategorized = sortedMemories.filter(
+      (memory) => !categoryOrder.includes(memory.category),
+    );
+
+    if (uncategorized.length > 0) {
+      groups.push({
+        category: "other",
+        title: "其他",
+        items: uncategorized,
+      });
+    }
+
+    return groups;
+  }, [memories, memoryCategoryFilter, memorySortMode]);
+
+  const toggleMemoryGroup = (groupKey: MemoryGroupKey) => {
+    setCollapsedMemoryGroups((current) => ({
+      ...current,
+      [groupKey]: !current[groupKey],
+    }));
   };
 
   const handleReminderAction = async (
@@ -1456,6 +2054,21 @@ export const App = () => {
               
               <button
                 type="button"
+                className={`sidebar-nav-item ${activePanelTab === "status" ? "is-active" : ""}`}
+                onClick={() => setActivePanelTab("status")}
+                title="状态"
+              >
+                <span className="sidebar-nav-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <path d="M4 19h16" />
+                    <path d="M7 15l3-3 3 2 4-6" />
+                  </svg>
+                </span>
+                <span className="sidebar-nav-label">状态</span>
+              </button>
+
+              <button
+                type="button"
                 className={`sidebar-nav-item ${activePanelTab === "settings" ? "is-active" : ""}`}
                 onClick={() => setActivePanelTab("settings")}
                 title="设置"
@@ -1469,21 +2082,33 @@ export const App = () => {
                 <span className="sidebar-nav-label">设置</span>
               </button>
             </div>
-            
+
             <div className="sidebar-spacer" />
-            
+
             <div className="sidebar-version">v0.1.0</div>
           </nav>
 
           {/* 主内容区 */}
-          <div className="panel-main">
+          <div className={`panel-main ${activePanelTab === "chat" ? "is-chat-tab" : ""}`}>
             <header className="panel-header">
               <div className="panel-header-left">
                 <p className="panel-kicker">
-                  {activePanelTab === "chat" ? "Chat" : activePanelTab === "memory" ? "Memory" : "Settings"}
+                  {activePanelTab === "chat"
+                    ? "Chat"
+                    : activePanelTab === "memory"
+                      ? "Memory"
+                      : activePanelTab === "status"
+                        ? "Companion"
+                        : "Settings"}
                 </p>
                 <h1 className="panel-title">
-                  {activePanelTab === "chat" ? "对话记录" : activePanelTab === "memory" ? "记忆与日记" : "应用设置"}
+                  {activePanelTab === "chat"
+                    ? "对话记录"
+                    : activePanelTab === "memory"
+                      ? "记忆与日记"
+                      : activePanelTab === "status"
+                        ? "桌宠状态"
+                        : "应用设置"}
                 </h1>
               </div>
               {activePanelTab === "chat" ? (
@@ -1494,7 +2119,7 @@ export const App = () => {
                         <circle cx="12" cy="12" r="10" />
                         <path d="M12 6v6l4 2" />
                       </svg>
-                      {messages.length} 条
+                      {sessionStats.messageCount} 条
                     </span>
                     <span className="token-stat-divider">|</span>
                     <span className="token-stat-item" title="用户输入 Token">
@@ -1511,7 +2136,7 @@ export const App = () => {
                       await createNewSession();
                       setSessionStats({ messageCount: 0, userTokens: 0, assistantTokens: 0 });
                     }}
-                    disabled={isSending || isLoading}
+                    disabled={isSending || isLoading || Boolean(switchingSessionId)}
                   >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M12 5v14M5 12h14" />
@@ -1522,119 +2147,263 @@ export const App = () => {
               ) : null}
             </header>
 
-            <div className="panel-content">
+            <div className={`panel-content ${activePanelTab === "chat" ? "is-chat-tab" : ""}`}>
               {/* 聊天标签页 */}
               {activePanelTab === "chat" ? (
-                <section className="chat-section">
-                  <div className="message-feed">
-                    {isLoading ? (
-                      <article className="message-empty">
-                        <p className="message-empty-title">正在载入会话</p>
-                      </article>
-                    ) : messages.length === 0 ? (
-                      <article className="message-empty">
-                        <p className="message-empty-title">还没有聊天记录</p>
-                        <p className="message-empty-copy">
-                          点击桌宠开始对话
-                        </p>
-                      </article>
-                    ) : (
-                      (() => {
-                        let cumulativeTokens = 0;
-                        return messages.map((message) => {
-                          const msgTokens = Math.ceil(message.text.length / 2);
-                          cumulativeTokens += msgTokens;
-                          const reminderId =
-                            message.source === "reminder"
-                              ? message.relatedReminderId
-                              : undefined;
-                          const hasReminderActions = Boolean(
-                            reminderId &&
-                              !acknowledgedReminderIds.has(reminderId),
-                          );
-                          const reminderActionLoading = Boolean(
-                            reminderId &&
-                              acknowledgingReminderIds.has(reminderId),
-                          );
-                          return (
-                            <article
-                              key={message.messageId}
-                              className={`message-card role-${message.role}`}
-                            >
-                              <div className="message-meta">
-                                <span className="message-author">
-                                  {getAuthorLabel(message.role, petName)}
-                                </span>
-                                <div className="message-meta-right">
-                                  <span className="message-tokens" title={`本条: ${msgTokens} tokens`}>
-                                    {msgTokens} tk
-                                  </span>
-                                  <time
-                                    className="message-time"
-                                    dateTime={message.createdAt}
-                                  >
-                                    {formatMessageTime(message.createdAt)}
-                                  </time>
-                                </div>
-                              </div>
-                              <p className="message-text">{message.text}</p>
-                              <div className="message-footer">
-                                <span className="message-cumulative">
-                                  累计: {cumulativeTokens} tokens
-                                </span>
-                                {hasReminderActions && reminderId ? (
-                                  <div className="message-footer-actions">
-                                    <button
-                                      type="button"
-                                      className="reminder-action-btn"
-                                      disabled={reminderActionLoading}
-                                      onClick={() => {
-                                        void handleReminderAction(
-                                          reminderId,
-                                          "dismiss",
-                                        );
-                                      }}
-                                    >
-                                      知道了
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="reminder-action-btn is-primary"
-                                      disabled={reminderActionLoading}
-                                      onClick={() => {
-                                        void handleReminderAction(
-                                          reminderId,
-                                          "open_chat",
-                                        );
-                                      }}
-                                    >
-                                      去聊天
-                                    </button>
-                                  </div>
-                                ) : null}
-                              </div>
-                            </article>
-                          );
-                        });
-                      })()
-                    )}
-
-                    {streamingPhase !== "idle" ? (
-                      <article className="message-card role-assistant is-streaming">
-                        <div className="message-meta">
-                          <span className="message-author">{petName}</span>
-                          <span className="message-time">
-                            {streamingPhase === "waiting" ? "等待首字" : "流式中"}
-                          </span>
+                <section className="chat-workspace">
+                  <aside className="chat-session-pane">
+                    <div className="chat-session-pane-header">
+                      <div className="chat-session-sidebar-header">
+                        <div>
+                          <p className="chat-session-sidebar-title">最近会话</p>
+                          <p className="chat-session-sidebar-copy">
+                            选中后会切换为当前活动会话
+                          </p>
                         </div>
-                        <p className="message-text">
-                          {streamingPhase === "waiting"
-                            ? "正在思考..."
-                            : streamingAssistantText}
+                        <span className="chat-session-sidebar-count">
+                          {sessions.length}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="chat-session-list">
+                      {sessionsLoading ? (
+                        <article className="chat-session-empty">
+                          正在载入会话...
+                        </article>
+                      ) : sessions.length === 0 ? (
+                        <article className="chat-session-empty">
+                          还没有历史会话
+                        </article>
+                      ) : (
+                        sessions.map((session) => {
+                          const isActiveChatSession =
+                            session.sessionId === activeSession?.sessionId;
+                          const isSwitchingChatSession =
+                            switchingSessionId === session.sessionId;
+
+                          return (
+                            <button
+                              key={session.sessionId}
+                              type="button"
+                              className={`chat-session-item ${isActiveChatSession ? "is-active" : ""}`}
+                              disabled={
+                                isLoading ||
+                                isSending ||
+                                isSwitchingChatSession
+                              }
+                              onClick={() => {
+                                void switchSession(session.sessionId);
+                              }}
+                            >
+                              <div className="chat-session-item-top">
+                                <span className="chat-session-item-id">
+                                  {formatSessionLabel(session.sessionId)}
+                                </span>
+                                <span
+                                  className={`chat-session-item-status ${session.status === "active" ? "is-active" : ""}`}
+                                >
+                                  {isSwitchingChatSession
+                                    ? "切换中"
+                                    : getSessionStatusLabel(session.status)}
+                                </span>
+                              </div>
+                              <time
+                                className="chat-session-item-time"
+                                dateTime={session.lastMessageAt}
+                              >
+                                {formatSessionTime(session.lastMessageAt)}
+                              </time>
+                              <span className="chat-session-item-meta">
+                                创建于 {formatSessionTime(session.startedAt)}
+                              </span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </aside>
+
+                  <section className="chat-conversation-pane">
+                    <div className="chat-conversation-topbar">
+                      <div className="chat-history-toolbar-copy">
+                        <p className="chat-history-toolbar-title">
+                          {activeSession
+                            ? `当前会话 ${formatSessionLabel(activeSession.sessionId)}`
+                            : "当前会话"}
                         </p>
-                      </article>
-                    ) : null}
-                  </div>
+                        <p className="chat-history-toolbar-subtitle">
+                          {historyHasMore
+                            ? "可以继续向上补载更早消息。"
+                            : "已经是这个会话的最早记录。"}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="chat-history-load-more"
+                        onClick={() => {
+                          void loadOlderMessages();
+                        }}
+                        disabled={
+                          isLoading ||
+                          historyLoadingMore ||
+                          !historyHasMore
+                        }
+                      >
+                        {historyLoadingMore
+                          ? "载入中..."
+                          : historyHasMore
+                            ? "加载更早消息"
+                            : "没有更早消息"}
+                      </button>
+                    </div>
+
+                    <div className="message-feed">
+                      {isLoading ? (
+                        <article className="message-empty">
+                          <p className="message-empty-title">正在载入会话</p>
+                        </article>
+                      ) : messages.filter((message) =>
+                          shouldRenderChatMessage(message, reminderRecordsById),
+                        ).length === 0 ? (
+                        <article className="message-empty">
+                          <p className="message-empty-title">当前没有需要在聊天区显示的内容</p>
+                          <p className="message-empty-copy">
+                            主动关心会走桌宠侧输出，不再直接出现在聊天记录里
+                          </p>
+                        </article>
+                      ) : (
+                        (() => {
+                          let cumulativeTokens = 0;
+                          return messages
+                            .filter((message) =>
+                              shouldRenderChatMessage(message, reminderRecordsById),
+                            )
+                            .map((message) => {
+                              const msgTokens = Math.ceil(message.text.length / 2);
+                              cumulativeTokens += msgTokens;
+                              const reminderId =
+                                message.source === "reminder"
+                                  ? message.relatedReminderId
+                                  : undefined;
+                              const hasReminderActions = Boolean(
+                                reminderId &&
+                                  !acknowledgedReminderIds.has(reminderId),
+                              );
+                              const reminderActionLoading = Boolean(
+                                reminderId &&
+                                  acknowledgingReminderIds.has(reminderId),
+                              );
+                              return (
+                                <article
+                                  key={message.messageId}
+                                  className={`message-card role-${message.role}`}
+                                >
+                                  <div className="message-meta">
+                                    <span className="message-author">
+                                      {getAuthorLabel(message.role, petName)}
+                                    </span>
+                                    <div className="message-meta-right">
+                                      <span className="message-tokens" title={`本条: ${msgTokens} tokens`}>
+                                        {msgTokens} tk
+                                      </span>
+                                      <time
+                                        className="message-time"
+                                        dateTime={message.createdAt}
+                                      >
+                                        {formatMessageTime(message.createdAt)}
+                                      </time>
+                                    </div>
+                                  </div>
+                                  <p className="message-text">{message.text}</p>
+                                  <div className="message-footer">
+                                    <span className="message-cumulative">
+                                      累计: {cumulativeTokens} tokens
+                                    </span>
+                                    {hasReminderActions && reminderId ? (
+                                      <div className="message-footer-actions">
+                                        <button
+                                          type="button"
+                                          className="reminder-action-btn"
+                                          disabled={reminderActionLoading}
+                                          onClick={() => {
+                                            void handleReminderAction(
+                                              reminderId,
+                                              "dismiss",
+                                            );
+                                          }}
+                                        >
+                                          知道了
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="reminder-action-btn is-primary"
+                                          disabled={reminderActionLoading}
+                                          onClick={() => {
+                                            void handleReminderAction(
+                                              reminderId,
+                                              "open_chat",
+                                            );
+                                          }}
+                                        >
+                                          去聊天
+                                        </button>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </article>
+                              );
+                            });
+                        })()
+                      )}
+
+                      {streamingPhase !== "idle" ? (
+                        <article className="message-card role-assistant is-streaming">
+                          <div className="message-meta">
+                            <span className="message-author">{petName}</span>
+                            <span className="message-time">
+                              {streamingPhase === "waiting" ? "等待首字" : "流式中"}
+                            </span>
+                          </div>
+                          <p className="message-text">
+                            {streamingPhase === "waiting"
+                              ? "正在思考..."
+                              : streamingAssistantText}
+                          </p>
+                        </article>
+                      ) : null}
+                    </div>
+
+                    <form className="composer composer-chat" onSubmit={handleSubmit}>
+                      <textarea
+                        ref={panelComposerRef}
+                        id="panel-composer"
+                        className="composer-input"
+                        placeholder="输入消息..."
+                        rows={2}
+                        value={draft}
+                        disabled={isLoading || Boolean(switchingSessionId)}
+                        onChange={(event) => setDraft(event.target.value)}
+                        onKeyDown={handlePanelComposerKeyDown}
+                      />
+
+                      <div className="composer-footer">
+                        <p className="composer-status">{composerMessage}</p>
+                        <button
+                          type="submit"
+                          className="composer-submit"
+                          disabled={
+                            isLoading ||
+                            isSending ||
+                            Boolean(switchingSessionId) ||
+                            draft.trim().length === 0
+                          }
+                        >
+                          {isSending ? "发送中..." : "发送"}
+                        </button>
+                      </div>
+                    </form>
+                  </section>
                 </section>
               ) : null}
 
@@ -1662,68 +2431,302 @@ export const App = () => {
                     <div className="memory-loading">
                       <p>加载中...</p>
                     </div>
-                  ) : activeMemoryTab === "diaries" ? (
-                    <div className="diary-list">
-                      {diaries.length === 0 ? (
-                        <article className="message-empty">
-                          <p className="message-empty-title">还没有日记</p>
-                          <p className="message-empty-copy">
-                            与桌宠聊天后会自动生成日记
-                          </p>
-                        </article>
-                      ) : (
-                        diaries.map((diary) => (
-                          <article key={diary.diaryId} className="diary-card">
-                            <header className="diary-header">
-                              <h3 className="diary-date">{formatDate(diary.date)}</h3>
-                              <span className="diary-memory-count">
-                                {diary.memoryCount} 条记忆
-                              </span>
-                            </header>
-                            <p className="diary-text">{diary.diaryText}</p>
-                            {diary.highlights.length > 0 ? (
-                              <div className="diary-highlights">
-                                {diary.highlights.map((highlight, index) => (
-                                  <span key={index} className="diary-highlight">
-                                    {highlight}
-                                  </span>
-                                ))}
-                              </div>
-                            ) : null}
-                          </article>
-                        ))
-                      )}
-                    </div>
                   ) : (
-                    <div className="memory-list">
-                      {memories.length === 0 ? (
+                    <>
+                      {memoryLoadError ? (
                         <article className="message-empty">
-                          <p className="message-empty-title">还没有记忆</p>
-                          <p className="message-empty-copy">
-                            与桌宠互动后会自动形成记忆
-                          </p>
+                          <p className="message-empty-title">陪伴记录加载不完整</p>
+                          <p className="message-empty-copy">{memoryLoadError}</p>
+                          <button
+                            type="button"
+                            className="memory-filter-chip"
+                            onClick={() => void loadMemoryData()}
+                          >
+                            重新加载
+                          </button>
                         </article>
+                      ) : null}
+                      {activeMemoryTab === "diaries" ? (
+                        <div className="diary-list">
+                          {diaries.length === 0 ? (
+                            <article className="message-empty">
+                              <p className="message-empty-title">还没有日记</p>
+                              <p className="message-empty-copy">
+                                与桌宠聊天后会自动生成日记
+                              </p>
+                            </article>
+                          ) : (
+                            diaries.map((diary) => (
+                              <article key={diary.diaryId} className="diary-card">
+                                <header className="diary-header">
+                                  <h3 className="diary-date">{formatDate(diary.date)}</h3>
+                                  <span className="diary-memory-count">
+                                    {diary.memoryCount} 条记忆
+                                  </span>
+                                </header>
+                                <p className="diary-text">{diary.diaryText}</p>
+                                {diary.highlights.length > 0 ? (
+                                  <div className="diary-highlights">
+                                    {diary.highlights.map((highlight, index) => (
+                                      <span key={index} className="diary-highlight">
+                                        {highlight}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : null}
+                              </article>
+                            ))
+                          )}
+                        </div>
                       ) : (
-                        memories.map((memory) => (
-                          <article key={memory.memoryId} className="memory-card">
-                            <header className="memory-header">
-                              <span className={`memory-category category-${memory.category}`}>
-                                {getCategoryLabel(memory.category)}
-                              </span>
-                              <span className="memory-key">{memory.key}</span>
-                            </header>
-                            <p className="memory-value">{memory.valueText}</p>
-                            <footer className="memory-footer">
-                              <span className="memory-confidence">
-                                置信度 {Math.round(memory.confidence * 100)}%
-                              </span>
-                            </footer>
-                          </article>
-                        ))
+                        <>
+                          <div className="memory-filter-row">
+                            {([
+                              ["all", "全部"],
+                              ["profile", "档案"],
+                              ["relationship", "关系"],
+                              ["habit", "习惯"],
+                              ["event", "事件"],
+                              ["preference", "偏好"],
+                            ] as const).map(([category, label]) => (
+                              <button
+                                key={category}
+                                type="button"
+                                className={`memory-filter-chip ${memoryCategoryFilter === category ? "is-active" : ""}`}
+                                onClick={() => setMemoryCategoryFilter(category)}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="memory-toolbar-row">
+                            <span className="memory-toolbar-label">排序</span>
+                            <button
+                              type="button"
+                              className={`memory-filter-chip ${memorySortMode === "recent" ? "is-active" : ""}`}
+                              onClick={() => setMemorySortMode("recent")}
+                            >
+                              最近更新
+                            </button>
+                            <button
+                              type="button"
+                              className={`memory-filter-chip ${memorySortMode === "confidence" ? "is-active" : ""}`}
+                              onClick={() => setMemorySortMode("confidence")}
+                            >
+                              置信度
+                            </button>
+                          </div>
+                          <div className="memory-list">
+                            {memories.length === 0 ? (
+                              <article className="message-empty">
+                                <p className="message-empty-title">还没有记忆</p>
+                                <p className="message-empty-copy">
+                                  与桌宠互动后会自动形成记忆
+                                </p>
+                              </article>
+                            ) : groupedMemories.length === 0 ? (
+                              <article className="message-empty">
+                                <p className="message-empty-title">这个分类还没有内容</p>
+                                <p className="message-empty-copy">
+                                  换个分类看看，或者继续和桌宠互动。
+                                </p>
+                              </article>
+                            ) : (
+                              groupedMemories.map((group) => (
+                                <section key={group.title} className="memory-group">
+                                  <button
+                                    type="button"
+                                    className="memory-group-header memory-group-toggle"
+                                    onClick={() => toggleMemoryGroup(group.category)}
+                                  >
+                                    <h3 className="memory-group-title">{group.title}</h3>
+                                    <div className="memory-group-header-right">
+                                      <span className="memory-group-count">{group.items.length}</span>
+                                      <span className="memory-group-caret">
+                                        {collapsedMemoryGroups[group.category] ? "展开" : "收起"}
+                                      </span>
+                                    </div>
+                                  </button>
+                                  {!collapsedMemoryGroups[group.category] ? (
+                                    <div className="memory-group-list">
+                                      {group.items.map((memory) => (
+                                        <article key={memory.memoryId} className="memory-card">
+                                          <header className="memory-header">
+                                            <span className={`memory-category category-${memory.category}`}>
+                                              {getCategoryLabel(memory.category)}
+                                            </span>
+                                            <span className="memory-key">{memory.key}</span>
+                                          </header>
+                                          <p className="memory-value">{memory.valueText}</p>
+                                          <footer className="memory-footer">
+                                            <span className="memory-confidence">
+                                              置信度 {Math.round(memory.confidence * 100)}%
+                                            </span>
+                                            <time className="memory-updated-at" dateTime={memory.lastConfirmedAt}>
+                                              {formatDate(memory.lastConfirmedAt)}
+                                            </time>
+                                          </footer>
+                                        </article>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </section>
+                              ))
+                            )}
+                          </div>
+                        </>
                       )}
-                    </div>
+                    </>
                   )}
                 </>
+              ) : null}
+
+              {/* 状态标签页 */}
+              {activePanelTab === "status" ? (
+                <section className="status-page">
+                  <section className="status-hero-card">
+                    <div className="status-hero-art">
+                      <img
+                        className="status-hero-image"
+                        draggable={false}
+                        src={currentAsset.src}
+                        alt={petName}
+                      />
+                    </div>
+                    <div className="status-hero-copy">
+                      <p className="status-kicker">Companion Dex</p>
+                      <h2 className="status-name">{petName}</h2>
+                      <p className="status-summary">
+                        目前的陪伴记录显示，它正以「{statusText}」的状态陪着你。下面这段图鉴说明会根据最近的互动、记忆和日记持续刷新。
+                      </p>
+                      <div className="status-tags">
+                        <span className="status-tag">当前动作 · {visualState}</span>
+                        <span className="status-tag">关系阶段 · {affinityStage}</span>
+                        <span className="status-tag">像素缩放 · {pixelScale}x</span>
+                        <span className="status-tag">交互提示 · {dragHint}</span>
+                        <span className="status-tag">
+                          好感冷却 · {affinityCooldownRemainingMs > 0 ? `${Math.ceil(affinityCooldownRemainingMs / 60_000)} 分钟` : "已结束"}
+                        </span>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="status-metrics-grid">
+                    {metrics.map((metric) => (
+                      <article
+                        key={metric.key}
+                        className={`status-metric-card tone-${metric.tone}`}
+                      >
+                        <header className="status-metric-header">
+                          <span className="status-metric-label">{metric.label}</span>
+                          <span className="status-metric-badge">
+                            {getMetricToneLabel(metric.tone)}
+                          </span>
+                        </header>
+                        <div className="status-metric-value-row">
+                          <strong className="status-metric-value">{metric.value}</strong>
+                          <span className="status-metric-unit">/ 100</span>
+                        </div>
+                        <div className="status-metric-bar">
+                          <span
+                            className="status-metric-bar-fill"
+                            style={{ width: `${metric.value}%` }}
+                          />
+                        </div>
+                        <p className="status-metric-hint">{metric.hint}</p>
+                      </article>
+                    ))}
+                  </section>
+
+                  <section className="status-resources-card">
+                    <div className="status-section-copy">
+                      <p className="status-section-kicker">Resource Case</p>
+                      <h3 className="status-section-title">携带物与条件判定</h3>
+                    </div>
+                    <div className="status-resource-list">
+                      {resources.map((resource) => (
+                        <article key={resource.key} className="status-resource-item">
+                          <div>
+                            <p className="status-resource-label">{resource.label}</p>
+                            <p className="status-resource-hint">{resource.hint}</p>
+                          </div>
+                          <strong className="status-resource-value">{resource.value}</strong>
+                        </article>
+                      ))}
+                    </div>
+                    <div className="status-condition-list">
+                      <p className="status-condition-item">喂食：{actionAvailability.feedReason}</p>
+                      <p className="status-condition-item">玩耍：{actionAvailability.playReason}</p>
+                      <p className="status-condition-item">休息：{actionAvailability.restReason}</p>
+                    </div>
+                  </section>
+
+                  <section className="status-actions-card">
+                    <div className="status-section-copy">
+                      <p className="status-section-kicker">Care Command</p>
+                      <h3 className="status-section-title">照料指令</h3>
+                      <p className="status-section-text">
+                        喂食、玩耍与休息都需要满足当前状态与资源条件；随机事件会在系统判断合适时自动触发。
+                      </p>
+                    </div>
+                    <div className="status-action-list">
+                      <button type="button" className="status-action-btn" onClick={feedPet}>
+                        喂点东西
+                      </button>
+                      <button type="button" className="status-action-btn" onClick={playWithPet}>
+                        陪它玩耍
+                      </button>
+                      <button type="button" className="status-action-btn" onClick={restPet}>
+                        让它休息
+                      </button>
+                    </div>
+                  </section>
+
+                  <section className="status-events-card">
+                    <div className="status-section-copy">
+                      <p className="status-section-kicker">Field Log</p>
+                      <h3 className="status-section-title">近期观察记录</h3>
+                    </div>
+                    {eventLogs.length === 0 ? (
+                      <p className="status-profile-text">
+                        目前还没有记录。等系统在合适时机触发随机事件后，这里会留下最近的陪伴观察。
+                      </p>
+                    ) : (
+                      <div className="status-event-list">
+                        {eventLogs.map((event) => (
+                          <article key={event.eventId} className={`status-event-item tone-${event.tone}`}>
+                            <div className="status-event-main">
+                              <strong className="status-event-title">{event.title}</strong>
+                              <p className="status-event-description">{event.description}</p>
+                            </div>
+                            <time className="status-event-time" dateTime={event.createdAt}>
+                              {formatMessageTime(event.createdAt)}
+                            </time>
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="status-profile-card">
+                    <div className="status-section-copy">
+                      <p className="status-section-kicker">Dex Note</p>
+                      <h3 className="status-section-title">个体图鉴说明</h3>
+                    </div>
+                    <p className="status-profile-text">
+                      {profileSummaryData?.summaryText ?? profileSummary}
+                    </p>
+                    {(profileSummaryData?.highlights ?? profileHighlights).length > 0 ? (
+                      <div className="status-profile-highlights">
+                        {(profileSummaryData?.highlights ?? profileHighlights).map((highlight: string, index: number) => (
+                          <span key={`${highlight}-${index}`} className="status-profile-highlight">
+                            {highlight}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </section>
+                </section>
               ) : null}
 
               {/* 设置标签页 */}
@@ -2028,7 +3031,127 @@ export const App = () => {
                     </div>
 
                     <div className="settings-section">
+                      <h3 className="settings-section-title">快捷键与工具</h3>
+                      <div className="settings-field">
+                        <label className="settings-label">剪贴板面板快捷键</label>
+                        <div className="settings-shortcut-row">
+                          <input
+                            ref={clipboardShortcutInputRef}
+                            type="text"
+                            className={`settings-input settings-shortcut-input ${
+                              isRecordingClipboardShortcut ? "is-recording" : ""
+                            }`}
+                            value={
+                              isRecordingClipboardShortcut
+                                ? "请直接按下新的组合键，按 Esc 取消"
+                                : formatAcceleratorLabel(
+                                    clipboardShortcutDraft ||
+                                      clipboardState?.shortcut.accelerator ||
+                                      defaultClipboardAccelerator,
+                                  )
+                            }
+                            onKeyDown={handleClipboardShortcutKeyDown}
+                            onBlur={() => {
+                              if (isRecordingClipboardShortcut) {
+                                stopClipboardShortcutRecording();
+                              }
+                            }}
+                            readOnly
+                          />
+                          <button
+                            type="button"
+                            className="settings-test-btn"
+                            onClick={() => {
+                              if (isRecordingClipboardShortcut) {
+                                stopClipboardShortcutRecording();
+                                return;
+                              }
+
+                              startClipboardShortcutRecording();
+                            }}
+                          >
+                            {isRecordingClipboardShortcut ? "取消录制" : "录制快捷键"}
+                          </button>
+                          <button
+                            type="button"
+                            className="settings-test-btn"
+                            onClick={() => {
+                              setClipboardShortcutDraft(
+                                clipboardState?.shortcut.defaultAccelerator ??
+                                  defaultClipboardAccelerator,
+                              );
+                              stopClipboardShortcutRecording();
+                            }}
+                          >
+                            恢复默认
+                          </button>
+                          <button
+                            type="button"
+                            className="settings-test-btn"
+                            onClick={() =>
+                              void window.zhuochong?.clipboard?.showPanel?.()
+                            }
+                            disabled={!clipboardState && clipboardLoading}
+                          >
+                            打开面板
+                          </button>
+                          <button
+                            type="button"
+                            className="settings-test-btn"
+                            onClick={async () => {
+                              try {
+                                const granted =
+                                  await window.zhuochong?.desktop.requestAccessibilityPermission?.();
+                                setSettingsMessage(
+                                  granted
+                                    ? "辅助功能权限已可用，剪贴板现在可以尝试自动粘贴。"
+                                    : "还没有获得辅助功能权限，请在系统设置里完成授权。",
+                                );
+                                setSettingsMessageType(granted ? "success" : "info");
+                              } catch (error) {
+                                setSettingsMessage(
+                                  error instanceof Error
+                                    ? error.message
+                                    : "请求辅助功能权限失败",
+                                );
+                                setSettingsMessageType("error");
+                              }
+                            }}
+                          >
+                            开启自动粘贴
+                          </button>
+                        </div>
+                        <p className="settings-hint">
+                          {clipboardLoading
+                            ? "正在读取当前快捷键..."
+                            : clipboardState?.shortcut.isRegistered
+                              ? "快捷键已注册。按下后会弹出最近复制的文字或图片；若已开启辅助功能权限，点选一条会直接自动粘贴。"
+                              : "快捷键当前未注册，通常是和系统或其他应用冲突，换一个组合后再保存。"}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="settings-section">
                       <h3 className="settings-section-title">桌宠外观</h3>
+                      <div className="settings-field">
+                        <label className="settings-label">界面主题</label>
+                        <select
+                          className="settings-select"
+                          value={themeModeDraft}
+                          onChange={(event) => {
+                            setThemeModeDraft(
+                              event.target.value as ZhuochongShellAppearanceMode,
+                            );
+                          }}
+                        >
+                          <option value="system">跟随系统</option>
+                          <option value="light">浅色</option>
+                          <option value="dark">深色</option>
+                        </select>
+                        <p className="settings-hint">
+                          {getThemeModeHint(themeModeDraft, appearance.resolvedTheme)}
+                        </p>
+                      </div>
                       <div className="settings-field">
                         <label className="settings-label">显示名称</label>
                         <input
@@ -2188,32 +3311,6 @@ export const App = () => {
               ) : null}
             </div>
 
-            {/* 聊天输入框 */}
-            {activePanelTab === "chat" ? (
-              <form className="composer" onSubmit={handleSubmit}>
-                <textarea
-                  ref={panelComposerRef}
-                  id="panel-composer"
-                  className="composer-input"
-                  placeholder="输入消息..."
-                  rows={2}
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={handlePanelComposerKeyDown}
-                />
-
-                <div className="composer-footer">
-                  <p className="composer-status">{composerMessage}</p>
-                  <button
-                    type="submit"
-                    className="composer-submit"
-                    disabled={isSending || draft.trim().length === 0}
-                  >
-                    {isSending ? "发送中..." : "发送"}
-                  </button>
-                </div>
-              </form>
-            ) : null}
           </div>
         </section>
       ) : null}
@@ -2272,4 +3369,13 @@ export const App = () => {
       </section>
     </main>
   );
+};
+
+export const App = () => {
+  const presentationMode = getPresentationMode();
+  if (presentationMode === "clipboard") {
+    return <ClipboardPalette />;
+  }
+
+  return <MainApp presentationMode={presentationMode} />;
 };

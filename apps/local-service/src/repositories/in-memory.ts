@@ -1,3 +1,4 @@
+import type { ChatSessionStatsDto } from "@zhuochong/ui-contracts";
 import { createPrefixedId, nowIso, toDateKey } from "@zhuochong/shared";
 
 import { defaultSettings } from "../config/default-settings.js";
@@ -31,24 +32,35 @@ const sortByNewest = <T extends { createdAt?: string; triggeredAt?: string; gene
   });
 
 export class InMemoryConversationRepository implements ConversationRepository {
-  private activeSession: ConversationSession | null = null;
+  private activeSessionId: string | null = null;
+
+  private readonly sessions = new Map<string, ConversationSession>();
 
   private readonly messages: ConversationMessage[] = [];
 
-  async getOrCreateActiveSession(): Promise<ConversationSession> {
-    if (this.activeSession) {
-      return this.activeSession;
-    }
-
+  private createSession(status: ConversationSession["status"]): ConversationSession {
     const timestamp = nowIso();
-    this.activeSession = {
+    return {
       sessionId: createPrefixedId("session"),
-      status: "active",
+      status,
       startedAt: timestamp,
       lastMessageAt: timestamp,
     };
+  }
 
-    return this.activeSession;
+  async getOrCreateActiveSession(): Promise<ConversationSession> {
+    if (this.activeSessionId) {
+      const activeSession = this.sessions.get(this.activeSessionId);
+      if (activeSession) {
+        return activeSession;
+      }
+    }
+
+    const session = this.createSession("active");
+    this.sessions.set(session.sessionId, session);
+    this.activeSessionId = session.sessionId;
+
+    return session;
   }
 
   async appendMessage(message: ConversationMessage): Promise<void> {
@@ -89,40 +101,82 @@ export class InMemoryConversationRepository implements ConversationRepository {
   }
 
   async touchSession(sessionId: string, lastMessageAt: string): Promise<void> {
-    if (!this.activeSession || this.activeSession.sessionId !== sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
       return;
     }
 
-    this.activeSession = {
-      ...this.activeSession,
+    this.sessions.set(sessionId, {
+      ...session,
       lastMessageAt,
-    };
+    });
   }
 
   async createNewSession(): Promise<ConversationSession> {
-    const timestamp = nowIso();
-    this.activeSession = {
-      sessionId: createPrefixedId("session"),
+    if (this.activeSessionId) {
+      const previousActiveSession = this.sessions.get(this.activeSessionId);
+      if (previousActiveSession) {
+        this.sessions.set(this.activeSessionId, {
+          ...previousActiveSession,
+          status: "archived",
+        });
+      }
+    }
+
+    const session = this.createSession("active");
+    this.sessions.set(session.sessionId, session);
+    this.activeSessionId = session.sessionId;
+    return session;
+  }
+
+  async setActiveSession(sessionId: string): Promise<ConversationSession | null> {
+    const targetSession = this.sessions.get(sessionId);
+    if (!targetSession) {
+      return null;
+    }
+
+    if (this.activeSessionId && this.activeSessionId !== sessionId) {
+      const previousActiveSession = this.sessions.get(this.activeSessionId);
+      if (previousActiveSession) {
+        this.sessions.set(this.activeSessionId, {
+          ...previousActiveSession,
+          status: "archived",
+        });
+      }
+    }
+
+    const nextSession: ConversationSession = {
+      ...targetSession,
       status: "active",
-      startedAt: timestamp,
-      lastMessageAt: timestamp,
     };
-    return this.activeSession;
+    this.sessions.set(sessionId, nextSession);
+    this.activeSessionId = sessionId;
+    return nextSession;
   }
 
   async listSessions(params: { limit: number }): Promise<ConversationSession[]> {
-    // 内存版本只返回当前活跃会话
-    if (!this.activeSession) {
-      return [];
+    return [...this.sessions.values()]
+      .sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt))
+      .slice(0, params.limit);
+  }
+
+  async archiveSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return;
     }
-    return [this.activeSession];
+
+    this.sessions.set(sessionId, {
+      ...session,
+      status: "archived",
+    });
+
+    if (this.activeSessionId === sessionId) {
+      this.activeSessionId = null;
+    }
   }
 
-  async archiveSession(_sessionId: string): Promise<void> {
-    // 内存版本不保留历史会话
-  }
-
-  async getSessionStats(sessionId: string): Promise<{ messageCount: number; userTokens: number; assistantTokens: number }> {
+  async getSessionStats(sessionId: string): Promise<ChatSessionStatsDto> {
     const sessionMessages = this.messages.filter(
       (message) => message.sessionId === sessionId,
     );

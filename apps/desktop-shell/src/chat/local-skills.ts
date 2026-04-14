@@ -3,6 +3,7 @@ import type {
   ReminderRuntimeStatusDto,
 } from "@zhuochong/ui-contracts";
 
+import { publishPanelTabRequest } from "../panel/panel-tab-sync.js";
 import { desktopLocalService } from "../services/local-service.js";
 
 type SystemInfoSkillRequest = {
@@ -18,6 +19,12 @@ type ManualReminderSkillRequest = {
   reminderText?: string;
   dueAtIso?: string;
   displayTimeText?: string;
+  parseError?: string;
+};
+
+type ExplicitRememberSkillRequest = {
+  skillId: "explicit_remember";
+  memoryText?: string;
   parseError?: string;
 };
 
@@ -39,14 +46,34 @@ type ReminderHistorySkillRequest = {
   limit: number;
 };
 
+type DesktopActionSkillRequest = {
+  skillId: "desktop_action";
+  action:
+    | "open_control_panel"
+    | "hide_control_panel"
+    | "show_pet"
+    | "hide_pet"
+    | "open_settings";
+};
+
 export type LocalSkillRequest =
   | SystemInfoSkillRequest
   | ManualReminderSkillRequest
+  | ExplicitRememberSkillRequest
   | ProductivitySkillRequest
   | ReminderRuntimeSkillRequest
-  | ReminderHistorySkillRequest;
+  | ReminderHistorySkillRequest
+  | DesktopActionSkillRequest;
 
-export type LocalSkillExecutionResult = {
+type DesktopActionExecutor = () => Promise<unknown>;
+
+type DesktopActionConfig = {
+  replyText: string;
+  unsupportedMessage?: string;
+  run: DesktopActionExecutor;
+};
+
+type LocalSkillExecutionResult = {
   replyText: string;
   statusText: string;
 };
@@ -175,6 +202,26 @@ const reminderHistoryPatterns = [
   /上一次提醒/,
   /最近弹了什么提醒/,
   /最近通知了什么/,
+] as const;
+const openControlPanelPatterns = [
+  /^\s*(?:请|麻烦|帮我|帮忙)?\s*(?:打开|显示|展开)\s*(?:控制台|控制面板|面板)\s*[。！!？?]*$/,
+  /^\s*(?:请|麻烦|帮我|帮忙)?\s*把\s*(?:控制台|控制面板|面板)\s*(?:打开|显示|展开)\s*[。！!？?]*$/,
+] as const;
+const hideControlPanelPatterns = [
+  /^\s*(?:请|麻烦|帮我|帮忙)?\s*(?:关闭|隐藏|收起)\s*(?:控制台|控制面板|面板)\s*[。！!？?]*$/,
+  /^\s*(?:请|麻烦|帮我|帮忙)?\s*把\s*(?:控制台|控制面板|面板)\s*(?:关闭|隐藏|收起)\s*[。！!？?]*$/,
+] as const;
+const showPetPatterns = [
+  /^\s*(?:请|麻烦|帮我|帮忙)?\s*(?:显示|召唤|叫出)\s*(?:桌宠|宠物)\s*[。！!？?]*$/,
+  /^\s*(?:请|麻烦|帮我|帮忙)?\s*把\s*(?:桌宠|宠物)\s*(?:显示出来|放出来|召唤出来)\s*[。！!？?]*$/,
+] as const;
+const hidePetPatterns = [
+  /^\s*(?:请|麻烦|帮我|帮忙)?\s*(?:隐藏|收起)\s*(?:桌宠|宠物)\s*[。！!？?]*$/,
+  /^\s*(?:请|麻烦|帮我|帮忙)?\s*把\s*(?:桌宠|宠物)\s*(?:隐藏|收起来|藏起来)\s*[。！!？?]*$/,
+] as const;
+const openSettingsPatterns = [
+  /^\s*(?:请|麻烦|帮我|帮忙)?\s*(?:打开|进入|切到|去)\s*(?:应用)?设置(?:页|页面)?\s*[。！!？?]*$/,
+  /^\s*(?:请|麻烦|帮我|帮忙)?\s*把\s*(?:应用)?设置(?:页|页面)?\s*(?:打开|切到)\s*[。！!？?]*$/,
 ] as const;
 
 const pad2 = (value: number) => String(value).padStart(2, "0");
@@ -662,6 +709,28 @@ const matchManualReminderSkill = (
   return null;
 };
 
+const matchExplicitRememberSkill = (
+  text: string,
+): ExplicitRememberSkillRequest | null => {
+  const matched = text.match(/^\s*记住(?:这个)?[：:，,\s]*(.+?)\s*[。！!？?]*$/);
+  if (!matched) {
+    return null;
+  }
+
+  const memoryText = matched[1]?.trim();
+  if (!memoryText) {
+    return {
+      skillId: "explicit_remember",
+      parseError: "你可以说“记住这个：我喜欢深色模式”。",
+    };
+  }
+
+  return {
+    skillId: "explicit_remember",
+    memoryText,
+  };
+};
+
 const matchProductivitySkill = (
   text: string,
 ): ProductivitySkillRequest | null => {
@@ -722,6 +791,47 @@ const matchReminderHistorySkill = (
   };
 };
 
+const matchDesktopActionSkill = (
+  text: string,
+): DesktopActionSkillRequest | null => {
+  if (matchesPattern(text, [...openSettingsPatterns])) {
+    return {
+      skillId: "desktop_action",
+      action: "open_settings",
+    };
+  }
+
+  if (matchesPattern(text, [...openControlPanelPatterns])) {
+    return {
+      skillId: "desktop_action",
+      action: "open_control_panel",
+    };
+  }
+
+  if (matchesPattern(text, [...hideControlPanelPatterns])) {
+    return {
+      skillId: "desktop_action",
+      action: "hide_control_panel",
+    };
+  }
+
+  if (matchesPattern(text, [...showPetPatterns])) {
+    return {
+      skillId: "desktop_action",
+      action: "show_pet",
+    };
+  }
+
+  if (matchesPattern(text, [...hidePetPatterns])) {
+    return {
+      skillId: "desktop_action",
+      action: "hide_pet",
+    };
+  }
+
+  return null;
+};
+
 const formatForegroundAppText = (systemInfo: ZhuochongSystemInfo) => {
   if (!systemInfo.foregroundApp) {
     return "我这边暂时没读到前台应用。";
@@ -757,6 +867,16 @@ export const matchLocalSkill = (
   const trimmedText = text.trim();
   if (!trimmedText) {
     return null;
+  }
+
+  const explicitRememberRequest = matchExplicitRememberSkill(trimmedText);
+  if (explicitRememberRequest) {
+    return explicitRememberRequest;
+  }
+
+  const desktopActionRequest = matchDesktopActionSkill(trimmedText);
+  if (desktopActionRequest) {
+    return desktopActionRequest;
   }
 
   const productivityRequest = matchProductivitySkill(trimmedText);
@@ -803,9 +923,83 @@ export const matchLocalSkill = (
   };
 };
 
+const publishPanelTabRequestAfterPanelOpen = async (tab: "settings") => {
+  await window.zhuochong?.desktop.openControlPanel();
+  publishPanelTabRequest(tab);
+};
+
+const runDesktopAction = async (
+  action: DesktopActionSkillRequest["action"],
+): Promise<LocalSkillExecutionResult> => {
+  const desktopActions: Record<DesktopActionSkillRequest["action"], DesktopActionConfig> = {
+    open_settings: {
+      replyText: "已打开控制台，并切到设置页。",
+      run: () => publishPanelTabRequestAfterPanelOpen("settings"),
+    },
+    open_control_panel: {
+      replyText: "已打开控制台。",
+      run: async () => {
+        const openControlPanel = window.zhuochong?.desktop.openControlPanel;
+        if (!openControlPanel) {
+          throw new Error("当前版本暂不支持打开控制台。");
+        }
+        await openControlPanel();
+      },
+    },
+    hide_control_panel: {
+      replyText: "已关闭控制台。",
+      unsupportedMessage: "当前版本暂不支持关闭控制台。",
+      run: async () => {
+        const hideControlPanel = window.zhuochong?.desktop.hideControlPanel;
+        if (!hideControlPanel) {
+          throw new Error("当前版本暂不支持关闭控制台。");
+        }
+        await hideControlPanel();
+      },
+    },
+    show_pet: {
+      replyText: "已显示桌宠。",
+      unsupportedMessage: "当前版本暂不支持显示桌宠。",
+      run: async () => {
+        const showPet = window.zhuochong?.desktop.showPet;
+        if (!showPet) {
+          throw new Error("当前版本暂不支持显示桌宠。");
+        }
+        await showPet();
+      },
+    },
+    hide_pet: {
+      replyText: "已隐藏桌宠。",
+      unsupportedMessage: "当前版本暂不支持隐藏桌宠。",
+      run: async () => {
+        const hidePet = window.zhuochong?.desktop.hidePet;
+        if (!hidePet) {
+          throw new Error("当前版本暂不支持隐藏桌宠。");
+        }
+        await hidePet();
+      },
+    },
+  };
+
+  const config = desktopActions[action];
+  if (!config) {
+    throw new Error("未支持的桌面动作。");
+  }
+
+  await config.run();
+  return {
+    replyText: config.replyText,
+    statusText: "已执行桌面动作。",
+  };
+};
+
 export const runLocalSkill = async (
   request: LocalSkillRequest,
 ): Promise<LocalSkillExecutionResult> => {
+  if (request.skillId === "desktop_action") {
+    return runDesktopAction(request.action);
+  }
+
   if (request.skillId === "productivity_info") {
     const snapshot = await window.zhuochong?.desktop.getProductivitySnapshot?.({
       scope: request.scope,

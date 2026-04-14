@@ -3,6 +3,7 @@ import type { ChatAppendMessageResponse } from "@zhuochong/ui-contracts";
 
 import { mapConversationMessageToDto, mapConversationSessionToDto } from "./mappers.js";
 import type { LocalServiceRuntime } from "./runtime.js";
+import { buildChatMemoryContext } from "./companion-memory.js";
 import type { AppSettings, ConversationMessage } from "../domain/models.js";
 
 const recentHistoryLimit = 12;
@@ -72,10 +73,30 @@ const supportsEnableThinking = (modelName: string) =>
     /^tencent\/Hunyuan-A13B-Instruct$/,
   ].some((pattern) => pattern.test(modelName));
 
-const createSystemPrompt = (settings: AppSettings) =>
+const getAffinityStageDescription = (
+  history: ConversationMessage[],
+) => {
+  const userMessages = history.filter((message) => message.role === "user").length;
+
+  if (userMessages >= 30) {
+    return "你和用户已经比较熟悉，语气可以更亲近自然，像长期陪伴的桌宠。";
+  }
+
+  if (userMessages >= 12) {
+    return "你和用户正在逐渐熟悉，语气自然温和，可以适度主动关心。";
+  }
+
+  return "你和用户还在建立联系，语气要克制、礼貌、轻柔，不要过分黏人。";
+};
+
+const createSystemPrompt = (
+  settings: AppSettings,
+  affinityStageDescription: string,
+) =>
   [
     `你是 ${settings.pet.displayName}，一只运行在 mac 上的桌面宠物。`,
     "请始终使用简体中文回复。",
+    affinityStageDescription,
     "语气自然、灵动、像陪伴型桌宠，但不要装腔、不要堆叠拟声词。",
     "默认回复控制在 1 到 2 句话，优先 12 到 36 个汉字，除非用户明确要求展开。",
     "直接回答用户问题，不要描述自己正在输出、摇尾巴、打字或冒气泡。",
@@ -290,12 +311,23 @@ export async function* streamAssistantReply(
     sessionId: params.sessionId,
     limit: recentHistoryLimit,
   });
+  const memoryContext = await buildChatMemoryContext(runtime);
+
+  const affinityStageDescription = getAffinityStageDescription(history);
 
   const upstreamMessages = [
     {
       role: "system",
-      content: createSystemPrompt(settings),
+      content: createSystemPrompt(settings, affinityStageDescription),
     },
+    ...(memoryContext
+      ? [
+          {
+            role: "system",
+            content: memoryContext,
+          },
+        ]
+      : []),
     ...history.map((message) => ({
       role: message.role,
       content: message.text,

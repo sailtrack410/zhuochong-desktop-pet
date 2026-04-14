@@ -21,4 +21,9 @@ export type {
   DiaryListQuery,
   DiaryListDto,
   DiaryGetQuery,
+  CompanionEventRecordRequest,
+  CompanionEventRecordResponse,
+  CompanionProfileSummaryDto,
+  ExplicitMemoryRememberRequest,
+  ExplicitMemoryRememberResponse,
 } from "./memory.js";
