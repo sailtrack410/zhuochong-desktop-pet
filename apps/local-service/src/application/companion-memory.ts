@@ -132,12 +132,37 @@ const cleanSentence = (text: string) =>
     .replace(/[\s，,。！？!?：:；;]+$/g, "")
     .trim();
 
+const clauseSplitPattern = /(?:，|,|、|；|;|\s+(?:也|还|并且|而且|同时)\s+)/;
+
+const splitSentenceClauses = (text: string) =>
+  text
+    .split(clauseSplitPattern)
+    .map((clause) => cleanSentence(clause))
+    .filter(Boolean);
+
 const normalizeMemoryValue = (text: string) =>
   cleanSentence(
     text
       .replace(/^(其实|就是|可能|感觉|觉得|然后|最近|目前|现在|平时)\s*/, "")
       .replace(/^(我)(?:自己)?/, ""),
   );
+
+const normalizeMemoryTopic = (text: string) =>
+  cleanSentence(
+    normalizeMemoryValue(text)
+      .replace(/^(很|最|比较|特别|有点|会|总是|经常|常常|一般|通常)/, "")
+      .replace(/^(在做|正在做|做|用|想要|希望|喜欢|讨厌|不喜欢|习惯)/, "")
+      .replace(/^(一个|一种|一些)/, ""),
+  ).slice(0, 24);
+
+const createSemanticMemoryKey = (
+  prefix: string,
+  text: string,
+  fallback: string,
+) => {
+  const topic = normalizeMemoryTopic(text);
+  return `${prefix}/${topic || fallback}`;
+};
 
 const splitChatSentences = (text: string) =>
   text
@@ -172,61 +197,65 @@ const inferConversationMemoryCandidates = (
   const candidates: MemoryRecord[] = [];
 
   for (const sentence of splitChatSentences(message.text)) {
-    const normalized = normalizeMemoryValue(sentence);
-    if (!normalized) {
-      continue;
+    for (const clause of splitSentenceClauses(sentence)) {
+      const normalized = normalizeMemoryValue(clause);
+      if (!normalized) {
+        continue;
+      }
+
+      let category: MemoryRecord["category"] | null = null;
+      let key = "";
+      let confidence = 0.72;
+
+      if (/我(很)?喜欢|我(最)?爱/.test(clause)) {
+        category = "preference";
+        key = createSemanticMemoryKey("偏好", clause, "喜欢的事");
+        confidence = 0.86;
+      } else if (/我不喜欢|我讨厌|我不想/.test(clause)) {
+        category = "preference";
+        key = createSemanticMemoryKey("避开", clause, "不喜欢的事");
+        confidence = 0.86;
+      } else if (/我想要|我希望|希望你|最好|别\s*/.test(clause)) {
+        category = "preference";
+        key = createSemanticMemoryKey("期待", clause, "期待偏好");
+        confidence = 0.78;
+      } else if (/我一般|我通常|我经常|我每天|我老是|我习惯/.test(clause)) {
+        category = "habit";
+        key = createSemanticMemoryKey("习惯", clause, "日常习惯");
+        confidence = 0.8;
+      } else if (/我是|我在.+(?:工作|上班|上学)|我是个|我做.+开发|我最近在做/.test(clause)) {
+        category = "profile";
+        key = /我最近在做/.test(clause)
+          ? createSemanticMemoryKey("近况", clause, "最近在做的事")
+          : createSemanticMemoryKey("档案", clause, "个人概况");
+        confidence = 0.74;
+      }
+
+      if (!category) {
+        continue;
+      }
+
+      const valueText = normalized.slice(0, 80);
+      if (!valueText) {
+        continue;
+      }
+
+      candidates.push(
+        buildConversationMemory({
+          category,
+          key,
+          valueText,
+          observedAt,
+          sourceMessageId: message.messageId,
+          confidence,
+        }),
+      );
     }
-
-    let category: MemoryRecord["category"] | null = null;
-    let key = "";
-    let confidence = 0.72;
-
-    if (/我(很)?喜欢/.test(sentence) || /我(最)?爱/.test(sentence)) {
-      category = "preference";
-      key = "喜欢的事";
-      confidence = 0.86;
-    } else if (/我不喜欢/.test(sentence) || /我讨厌/.test(sentence) || /我不想/.test(sentence)) {
-      category = "preference";
-      key = "不喜欢的事";
-      confidence = 0.86;
-    } else if (/我想要|我希望|希望你|最好|别\s*/.test(sentence)) {
-      category = "preference";
-      key = "期待偏好";
-      confidence = 0.78;
-    } else if (/我一般|我通常|我经常|我每天|我老是|我习惯/.test(sentence)) {
-      category = "habit";
-      key = "日常习惯";
-      confidence = 0.8;
-    } else if (/我是|我在.+(?:工作|上班|上学)|我是个|我做.+开发|我最近在做/.test(sentence)) {
-      category = "profile";
-      key = /我最近在做/.test(sentence) ? "最近在做的事" : "个人概况";
-      confidence = 0.74;
-    }
-
-    if (!category) {
-      continue;
-    }
-
-    const valueText = normalized.slice(0, 80);
-    if (!valueText) {
-      continue;
-    }
-
-    candidates.push(
-      buildConversationMemory({
-        category,
-        key,
-        valueText,
-        observedAt,
-        sourceMessageId: message.messageId,
-        confidence,
-      }),
-    );
   }
 
   const deduped = new Map<string, MemoryRecord>();
   for (const candidate of candidates) {
-    deduped.set(`${candidate.category}:${candidate.key}`, candidate);
+    deduped.set(`${candidate.category}:${candidate.key}:${candidate.valueText}`, candidate);
   }
 
   return [...deduped.values()];
@@ -265,7 +294,11 @@ export const rememberExplicitMemory = async (
   return runtime.repositories.memoryRepository.upsert(
     createDerivedMemory({
       category,
-      key: createExplicitMemoryKey(valueText),
+      key: createSemanticMemoryKey(
+        category === "preference" ? "显式偏好" : "显式档案",
+        valueText,
+        createExplicitMemoryKey(valueText),
+      ),
       valueText,
       confidence: 0.96,
       observedAt,
@@ -707,12 +740,18 @@ export const buildChatMemoryContext = async (
     .slice(0, 6)
     .map((memory) => `- ${memory.key}：${memory.valueText}`);
 
+  const dedupedHighlights = summary.highlights.filter(
+    (highlight, index, array) =>
+      array.indexOf(highlight) === index &&
+      !memoryLines.some((line) => line.includes(highlight)),
+  );
+
   const parts = [
     `以下是你已经记住的用户与陪伴背景，请自然使用，不要逐条复述，也不要假装这些信息是刚刚才知道的。`,
     `关系阶段：${summary.relationStage}`,
     `个体摘要：${summary.summaryText}`,
-    summary.highlights.length > 0
-      ? `记忆提示：${summary.highlights.join("；")}`
+    dedupedHighlights.length > 0
+      ? `记忆提示：${dedupedHighlights.join("；")}`
       : null,
     memoryLines.length > 0
       ? `可参考的长期记忆：\n${memoryLines.join("\n")}`
