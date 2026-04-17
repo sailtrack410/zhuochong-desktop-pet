@@ -272,39 +272,40 @@ const parseSseEventData = async function* (
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-
-    buffer += decoder.decode(value, {
-      stream: true,
-    }).replace(/\r\n/g, "\n");
-
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary >= 0) {
-      const rawEvent = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-
-      const data = rawEvent
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim())
-        .join("\n");
-
-      if (data) {
-        yield data;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
       }
 
-      boundary = buffer.indexOf("\n\n");
-    }
-  }
+      buffer += decoder.decode(value, {
+        stream: true,
+      }).replace(/\r\n/g, "\n");
 
-  const rest = buffer.trim();
-  if (!rest) {
-    return;
-  }
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const rawEvent = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+
+        const data = rawEvent
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim())
+          .join("\n");
+
+        if (data) {
+          yield data;
+        }
+
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+
+    const rest = buffer.trim();
+    if (!rest) {
+      return;
+    }
 
   const data = rest
     .split("\n")
@@ -314,6 +315,9 @@ const parseSseEventData = async function* (
 
   if (data) {
     yield data;
+  }
+  } finally {
+    reader.releaseLock();
   }
 };
 
@@ -456,7 +460,15 @@ export async function* streamAssistantReply(
       };
     }
   } catch (error) {
-    streamError = error;
+    if (error instanceof TypeError) {
+      streamError = new Error("网络连接失败，请检查网络后重试。");
+    } else if (error instanceof DOMException && error.name === "AbortError") {
+      streamError = new Error("模型响应超时，请稍后再试。");
+    } else if (error instanceof DOMException && error.name === "TimeoutError") {
+      streamError = new Error("模型响应超时，请稍后再试。");
+    } else {
+      streamError = error;
+    }
   } finally {
     clearTimeout(requestTimeoutId);
     clearTimeout(firstTokenTimeoutId);

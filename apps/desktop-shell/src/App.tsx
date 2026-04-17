@@ -338,6 +338,18 @@ const MainApp = ({
   const isPanelMode = presentationMode === "panel";
   const isFloatMode = presentationMode === "float";
   const isPetMode = presentationMode === "pet";
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
+
+  useEffect(() => {
+    const goOffline = () => setIsOffline(true);
+    const goOnline = () => setIsOffline(false);
+    window.addEventListener("offline", goOffline);
+    window.addEventListener("online", goOnline);
+    return () => {
+      window.removeEventListener("offline", goOffline);
+      window.removeEventListener("online", goOnline);
+    };
+  }, []);
   const { appearance } = useShellAppearance();
   const [petRuntimeSettings, setPetRuntimeSettings] = useState<PetRuntimeSettings>(
     defaultPetRuntimeSettings,
@@ -2050,6 +2062,11 @@ const MainApp = ({
           {/* 侧边栏导航 */}
           <nav className="panel-sidebar">
             <div className="sidebar-logo">猫</div>
+            {isOffline && (
+              <div className="sidebar-offline-badge" title="网络已断开，部分功能可能不可用">
+                离线
+              </div>
+            )}
             
             <div className="sidebar-nav">
               <button
