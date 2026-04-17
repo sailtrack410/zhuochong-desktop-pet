@@ -363,6 +363,7 @@ const MainApp = ({
   );
   const {
     actionAvailability,
+    affinity,
     affinityCooldownRemainingMs,
     affinityStage,
     consumePetClick,
@@ -986,7 +987,7 @@ const MainApp = ({
       setIsComposerOpen(false);
     }
 
-    void sendMessage();
+    void sendMessage(undefined, affinity);
   };
 
   const handlePanelComposerKeyDown = (
@@ -995,7 +996,7 @@ const MainApp = ({
     // Enter 发送，Shift+Enter 换行
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      void sendMessage();
+      void sendMessage(undefined, affinity);
     }
   };
 
@@ -1012,7 +1013,7 @@ const MainApp = ({
 
       reopenComposerAfterSpeechRef.current = true;
       setIsComposerOpen(false);
-      void sendMessage();
+      void sendMessage(undefined, affinity);
     }
   };
 

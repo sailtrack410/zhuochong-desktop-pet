@@ -519,6 +519,7 @@ export const desktopLocalService = {
 
   async streamAssistantReply(params: {
     sessionId: string;
+    affinity?: number;
     onDelta: (text: string) => void;
   }): Promise<ChatAppendMessageResponse> {
     const controller = new AbortController();
@@ -536,6 +537,7 @@ export const desktopLocalService = {
         },
         body: JSON.stringify({
           sessionId: params.sessionId,
+          affinity: params.affinity,
         }),
         signal: controller.signal,
       });

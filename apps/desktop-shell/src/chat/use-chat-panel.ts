@@ -394,7 +394,7 @@ export const useChatPanel = () => {
     };
   }, [loadConversation]);
 
-  const sendMessage = async (input?: string) => {
+  const sendMessage = async (input?: string, affinity?: number) => {
     const text = (input ?? draft).trim();
     if (!text || !activeSessionRef.current) {
       return;
@@ -517,6 +517,7 @@ export const useChatPanel = () => {
 
       const assistantResponse = await desktopLocalService.streamAssistantReply({
         sessionId: userResponse.session.sessionId,
+        ...(affinity !== undefined ? { affinity } : {}),
         onDelta: (nextText) => {
           setStreamingPhase("streaming");
           updateStreamingTextDOM(nextText);

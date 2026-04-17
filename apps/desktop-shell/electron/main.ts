@@ -3998,15 +3998,22 @@ const createControlWindow = () => {
 
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+    const scriptSrc = isDev
+      ? "script-src 'self' 'unsafe-eval' 'unsafe-inline' http://127.0.0.1:5173; "
+      : "script-src 'self' 'unsafe-eval'; ";
+    const connectSrc = isDev
+      ? "connect-src 'self' http://127.0.0.1:3765 http://localhost:3765 http://127.0.0.1:5173 ws://127.0.0.1:5173 https:; "
+      : "connect-src 'self' http://127.0.0.1:3765 http://localhost:3765 https:; ";
     callback({
       responseHeaders: {
         ...details.responseHeaders,
         "Content-Security-Policy": [
           "default-src 'self'; " +
-          "script-src 'self' 'unsafe-eval'; " +
+          scriptSrc +
           "style-src 'self' 'unsafe-inline'; " +
           "img-src 'self' data: blob:; " +
-          "connect-src 'self' http://127.0.0.1:3765 http://localhost:3765 https:; " +
+          connectSrc +
           "font-src 'self'; " +
           "media-src 'none'; " +
           "object-src 'none';",

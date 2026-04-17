@@ -1215,6 +1215,7 @@ export const usePetController = (
 
   return {
     actionAvailability,
+    affinity,
     affinityCooldownRemainingMs,
     affinityStage,
     consumePetClick,
