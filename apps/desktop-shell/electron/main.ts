@@ -3763,6 +3763,7 @@ const createPetWindow = () => {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
 
@@ -3771,6 +3772,9 @@ const createPetWindow = () => {
   window.setVisibleOnAllWorkspaces(true, {
     visibleOnFullScreen: true,
   });
+
+  window.webContents.on("will-navigate", (event) => { event.preventDefault(); });
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
   window.once("ready-to-show", () => {
     window.show();
@@ -3831,6 +3835,7 @@ const createFloatWindow = () => {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
 
@@ -3838,6 +3843,9 @@ const createFloatWindow = () => {
   window.setVisibleOnAllWorkspaces(true, {
     visibleOnFullScreen: true,
   });
+
+  window.webContents.on("will-navigate", (event) => { event.preventDefault(); });
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
   attachWindowDiagnostics(window, "float");
 
@@ -3874,6 +3882,7 @@ const createClipboardWindow = () => {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
 
@@ -3881,6 +3890,8 @@ const createClipboardWindow = () => {
   window.setVisibleOnAllWorkspaces(true, {
     visibleOnFullScreen: true,
   });
+  window.webContents.on("will-navigate", (event) => { event.preventDefault(); });
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.once("ready-to-show", () => {
     positionClipboardWindow(window);
   });
@@ -3942,8 +3953,12 @@ const createControlWindow = () => {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
+
+  window.webContents.on("will-navigate", (event) => { event.preventDefault(); });
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
   window.once("ready-to-show", () => {
     window.show();
@@ -3965,6 +3980,24 @@ const createControlWindow = () => {
 };
 
 app.whenReady().then(async () => {
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        "Content-Security-Policy": [
+          "default-src 'self'; " +
+          "script-src 'self' 'unsafe-eval'; " +
+          "style-src 'self' 'unsafe-inline'; " +
+          "img-src 'self' data: blob:; " +
+          "connect-src 'self' http://127.0.0.1:3765 http://localhost:3765 https:; " +
+          "font-src 'self'; " +
+          "media-src 'none'; " +
+          "object-src 'none';",
+        ],
+      },
+    });
+  });
+
   configureMacApplicationShell();
   createStatusItem();
   loadDesktopShellState();
