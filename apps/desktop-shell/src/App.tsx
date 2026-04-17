@@ -63,6 +63,13 @@ const petComposerBaseWidth = 212;
 const petComposerMaxWidth = 320;
 const recentReminderNotificationWindowMs = 20_000;
 
+const quickPrompts = [
+  "今天心情怎么样？",
+  "给我讲个冷笑话",
+  "陪我聊聊天吧",
+  "你在做什么呀？",
+] as const;
+
 const formatSessionLabel = (sessionId?: string) =>
   sessionId ? formatSessionId(sessionId) : "未分配";
 
@@ -429,6 +436,7 @@ const MainApp = ({
     });
   }, [messages, streamingAssistantText]);
   const lastUserMessageIdRef = useRef<string | null>(null);
+  const lastAssistantMessageIdRef = useRef<string | null>(null);
   const speechTimerRef = useRef<number | null>(null);
   const composerAutoHideTimerRef = useRef<number | null>(null);
   const ambientMoveTimerRef = useRef<number | null>(null);
@@ -2061,7 +2069,7 @@ const MainApp = ({
         <section className="desk-panel">
           {/* 侧边栏导航 */}
           <nav className="panel-sidebar">
-            <div className="sidebar-logo">猫</div>
+            <div className="sidebar-logo">{petName.slice(0, 1)}</div>
             {isOffline && (
               <div className="sidebar-offline-badge" title="网络已断开，部分功能可能不可用">
                 离线
@@ -2172,7 +2180,7 @@ const MainApp = ({
                       你: {sessionStats.userTokens}
                     </span>
                     <span className="token-stat-item" title="AI 输出 Token">
-                      猫: {sessionStats.assistantTokens}
+                      {petName}: {sessionStats.assistantTokens}
                     </span>
                   </span>
                   <button
@@ -2219,7 +2227,7 @@ const MainApp = ({
                         </article>
                       ) : sessions.length === 0 ? (
                         <article className="chat-session-empty">
-                          还没有历史会话
+                          发送第一条消息后会自动创建会话
                         </article>
                       ) : (
                         sessions.map((session) => {
@@ -2313,9 +2321,9 @@ const MainApp = ({
                           shouldRenderChatMessage(message, reminderRecordsById),
                         ).length === 0 ? (
                         <article className="message-empty">
-                          <p className="message-empty-title">当前没有需要在聊天区显示的内容</p>
+                          <p className="message-empty-title">开始和 {petName} 聊天吧</p>
                           <p className="message-empty-copy">
-                            主动关心会走桌宠侧输出，不再直接出现在聊天记录里
+                            在下方输入消息，或点击快捷提示开始对话
                           </p>
                         </article>
                       ) : (
@@ -2420,6 +2428,24 @@ const MainApp = ({
                       ) : null}
                     </div>
 
+                    {messages.length === 0 && !isSending && !streamingAssistantText ? (
+                      <div className="quick-prompts">
+                        {quickPrompts.map((prompt) => (
+                          <button
+                            key={prompt}
+                            type="button"
+                            className="quick-prompt-chip"
+                            disabled={isLoading || Boolean(switchingSessionId)}
+                            onClick={() => {
+                              setDraft(prompt);
+                              panelComposerRef.current?.focus();
+                            }}
+                          >
+                            {prompt}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
                     <form className="composer composer-chat" onSubmit={handleSubmit}>
                       <textarea
                         ref={panelComposerRef}
