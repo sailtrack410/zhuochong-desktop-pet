@@ -106,6 +106,7 @@ const createMeta = (requestId: string, correlationId?: string): ContractMeta => 
 });
 
 const sendJson = (
+  request: IncomingMessage,
   response: ServerResponse,
   statusCode: number,
   payload: unknown,
@@ -117,7 +118,7 @@ const sendJson = (
   response.end(JSON.stringify(payload, null, 2));
 };
 
-const sendSseHeaders = (response: ServerResponse) => {
+const sendSseHeaders = (request: IncomingMessage, response: ServerResponse) => {
   applyCorsHeaders(request, response);
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -135,11 +136,12 @@ const writeSseEvent = (
 };
 
 const sendResult = <TData>(
+  request: IncomingMessage,
   response: ServerResponse,
   result: ContractResult<TData>,
   statusCode = 200,
 ): void => {
-  sendJson(response, statusCode, result);
+  sendJson(request, response, statusCode, result);
 };
 
 const failure = (
@@ -182,14 +184,14 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
 
     if (method === "GET" && url.pathname === "/health") {
       try {
-        sendJson(response, 200, {
+        sendJson(request, response, 200, {
           ok: true,
           service: "local-service",
           storage: runtime.storage,
           issuedAt: nowIso(),
         });
       } catch {
-        sendJson(response, 500, { ok: false, service: "local-service" });
+        sendJson(request, response, 500, { ok: false, service: "local-service" });
       }
       return;
     }
@@ -197,7 +199,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
     if (method === "GET" && url.pathname === "/settings/get") {
       try {
         const settings = await runtime.repositories.settingsRepository.get();
-        sendResult<SettingsDto>(response, {
+        sendResult<SettingsDto>(request, response, {
           ok: true,
           data: mapSettingsToDto(settings),
           meta: createMeta(requestId, correlationId),
@@ -207,7 +209,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           requestId, "INTERNAL_ERROR", "读取设置失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -228,7 +230,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
               ...(correlationId ? { correlationId } : {}),
             },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
@@ -237,7 +239,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           mapSettingsUpdateRequestToPatch(patch),
         );
 
-        sendResult<SettingsDto>(response, {
+        sendResult<SettingsDto>(request, response, {
           ok: true,
           data: mapSettingsToDto(nextSettings),
           meta: createMeta(requestId, correlationId),
@@ -252,7 +254,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -260,7 +262,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
     if (method === "GET" && url.pathname === "/chat/session/active") {
       try {
         const session = await runtime.repositories.conversationRepository.getOrCreateActiveSession();
-        sendResult<ChatSessionDto>(response, {
+        sendResult<ChatSessionDto>(request, response, {
           ok: true,
           data: mapConversationSessionToDto(session),
           meta: createMeta(requestId, correlationId),
@@ -270,7 +272,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           requestId, "INTERNAL_ERROR", "获取活动会话失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -278,7 +280,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
     if (method === "POST" && url.pathname === "/chat/session/new") {
       try {
         const session = await runtime.repositories.conversationRepository.createNewSession();
-        sendResult<ChatSessionDto>(response, {
+        sendResult<ChatSessionDto>(request, response, {
           ok: true,
           data: mapConversationSessionToDto(session),
           meta: createMeta(requestId, correlationId),
@@ -293,7 +295,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -317,7 +319,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
               ...(correlationId ? { correlationId } : {}),
             },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
@@ -337,11 +339,11 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
               ...(correlationId ? { correlationId } : {}),
             },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
-        sendResult<ChatSessionDto>(response, {
+        sendResult<ChatSessionDto>(request, response, {
           ok: true,
           data: mapConversationSessionToDto(session),
           meta: createMeta(requestId, correlationId),
@@ -356,7 +358,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -370,13 +372,13 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           "缺少 sessionId 参数。",
           { ...(correlationId ? { correlationId } : {}) },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
         return;
       }
 
       try {
         const stats = await runtime.repositories.conversationRepository.getSessionStats(sessionId);
-        sendResult<{ messageCount: number; userTokens: number; assistantTokens: number }>(response, {
+        sendResult<{ messageCount: number; userTokens: number; assistantTokens: number }>(request, response, {
           ok: true,
           data: stats,
           meta: createMeta(requestId, correlationId),
@@ -391,7 +393,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -402,7 +404,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
 
       try {
         const sessions = await runtime.repositories.conversationRepository.listSessions({ limit });
-        sendResult<ChatSessionDto[]>(response, {
+        sendResult<ChatSessionDto[]>(request, response, {
           ok: true,
           data: sessions.map(mapConversationSessionToDto),
           meta: createMeta(requestId, correlationId),
@@ -417,7 +419,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -443,7 +445,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
         return;
       }
 
@@ -461,7 +463,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
         mapConversationMessageToDto,
       );
 
-      sendResult<ChatHistoryDto>(response, {
+      sendResult<ChatHistoryDto>(request, response, {
         ok: true,
         data: {
           sessionId: parsed.data.sessionId,
@@ -490,7 +492,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
               ...(correlationId ? { correlationId } : {}),
             },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
@@ -510,7 +512,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
               ...(correlationId ? { correlationId } : {}),
             },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
@@ -534,7 +536,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
         );
         await rememberConversationMemories(runtime, message);
 
-        sendResult<ChatAppendMessageResponse>(response, {
+        sendResult<ChatAppendMessageResponse>(request, response, {
           ok: true,
           data: {
             session: mapConversationSessionToDto({
@@ -555,7 +557,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -584,7 +586,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           return;
         }
 
-        sendSseHeaders(response);
+        sendSseHeaders(request, response);
         writeSseEvent(response, {
           type: "started",
           requestId,
@@ -611,7 +613,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
         response.end();
       } catch (error) {
         if (!response.headersSent) {
-          sendSseHeaders(response);
+          sendSseHeaders(request, response);
         }
 
         writeSseEvent(response, {
@@ -626,7 +628,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
     if (method === "GET" && url.pathname === "/pet/state") {
       try {
         const latestSnapshot = await runtime.repositories.petStateRepository.getLatest();
-        sendResult<PetStateSnapshot>(response, {
+        sendResult<PetStateSnapshot>(request, response, {
           ok: true,
           data: latestSnapshot
             ? mapPetStateRecordToDto(latestSnapshot)
@@ -638,7 +640,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           requestId, "INTERNAL_ERROR", "获取桌宠状态失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -660,7 +662,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
               ...(correlationId ? { correlationId } : {}),
             },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
@@ -676,7 +678,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
 
         await runtime.repositories.petStateRepository.appendSnapshot(snapshot);
 
-        sendResult<PetStateSnapshot>(response, {
+        sendResult<PetStateSnapshot>(request, response, {
           ok: true,
           data: mapPetStateRecordToDto(snapshot),
           meta: createMeta(requestId, correlationId),
@@ -691,7 +693,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -699,7 +701,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
     if (method === "GET" && url.pathname === "/system/context") {
       try {
         const settings = await runtime.repositories.settingsRepository.get();
-        sendResult<SystemContextDto>(response, {
+        sendResult<SystemContextDto>(request, response, {
           ok: true,
           data: createDefaultSystemContextDto(settings),
           meta: createMeta(requestId, correlationId),
@@ -709,7 +711,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           requestId, "INTERNAL_ERROR", "获取系统上下文失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -733,14 +735,14 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
               ...(correlationId ? { correlationId } : {}),
             },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
         const payload: ExplicitMemoryRememberRequest = parsed.data;
         const memory = await rememberExplicitMemory(runtime, payload);
 
-        sendResult<ExplicitMemoryRememberResponse>(response, {
+        sendResult<ExplicitMemoryRememberResponse>(request, response, {
           ok: true,
           data: {
             memory: mapMemoryRecordToDto(memory),
@@ -757,7 +759,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -781,14 +783,14 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
               ...(correlationId ? { correlationId } : {}),
             },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
         const payload: CompanionEventRecordRequest = parsed.data;
         const recorded = await recordCompanionEvent(runtime, payload);
 
-        sendResult<CompanionEventRecordResponse>(response, {
+        sendResult<CompanionEventRecordResponse>(request, response, {
           ok: true,
           data: {
             memories: recorded.memories.map(mapMemoryRecordToDto),
@@ -806,14 +808,14 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
 
     if (method === "GET" && url.pathname === "/memory/profile-summary") {
       try {
-        sendResult<CompanionProfileSummaryDto>(response, {
+        sendResult<CompanionProfileSummaryDto>(request, response, {
           ok: true,
           data: await buildCompanionProfileSummary(runtime),
           meta: createMeta(requestId, correlationId),
@@ -828,7 +830,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -855,7 +857,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
         return;
       }
 
@@ -869,7 +871,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           .filter((m) => m.status === "active")
           .map(mapMemoryRecordToDto);
 
-        sendResult<MemoryListDto>(response, {
+        sendResult<MemoryListDto>(request, response, {
           ok: true,
           data: {
             memories: memoryDtos,
@@ -882,7 +884,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           requestId, "INTERNAL_ERROR", "获取记忆列表失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -907,7 +909,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
         return;
       }
 
@@ -916,7 +918,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           parsed.data.limit ?? 7,
         );
 
-        sendResult<DiaryListDto>(response, {
+        sendResult<DiaryListDto>(request, response, {
           ok: true,
           data: {
             entries: entries.map(mapDiaryEntryToDto),
@@ -928,7 +930,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           requestId, "INTERNAL_ERROR", "获取日记列表失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -953,14 +955,14 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
         return;
       }
 
       try {
         const entry = await runtime.repositories.diaryRepository.getByDate(parsed.data.date);
 
-        sendResult<DiaryEntryDto | null>(response, {
+        sendResult<DiaryEntryDto | null>(request, response, {
           ok: true,
           data: entry ? mapDiaryEntryToDto(entry) : null,
           meta: createMeta(requestId, correlationId),
@@ -970,7 +972,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           requestId, "INTERNAL_ERROR", "获取日记失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -993,7 +995,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
               ...(correlationId ? { correlationId } : {}),
             },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
@@ -1005,7 +1007,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             "提醒时间需要晚于当前时间。",
             { ...(correlationId ? { correlationId } : {}) },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
@@ -1021,7 +1023,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
 
         await runtime.repositories.reminderLogRepository.append(record);
 
-        sendResult<ReminderCreateResponse>(response, {
+        sendResult<ReminderCreateResponse>(request, response, {
           ok: true,
           data: mapReminderRecordToDto(record),
           meta: createMeta(requestId, correlationId),
@@ -1036,7 +1038,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -1059,7 +1061,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
               ...(correlationId ? { correlationId } : {}),
             },
           );
-          sendResult(response, result.body, result.statusCode);
+          sendResult(request, response, result.body, result.statusCode);
           return;
         }
 
@@ -1072,7 +1074,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           acknowledgedAt: nowIso(),
         });
 
-        sendResult<ReminderAcknowledgeResponse>(response, {
+        sendResult<ReminderAcknowledgeResponse>(request, response, {
           ok: true,
           data: {
             reminderId: parsed.data.reminderId,
@@ -1090,7 +1092,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -1115,7 +1117,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
         return;
       }
 
@@ -1126,7 +1128,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
         });
         const reminders = records.map(mapReminderRecordToDto);
 
-        sendResult<ReminderListDto>(response, {
+        sendResult<ReminderListDto>(request, response, {
           ok: true,
           data: {
             reminders,
@@ -1139,14 +1141,14 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           requestId, "INTERNAL_ERROR", "获取提醒列表失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
 
     if (method === "GET" && url.pathname === "/reminder/runtime-status") {
       try {
-        sendResult<ReminderRuntimeStatusDto>(response, {
+        sendResult<ReminderRuntimeStatusDto>(request, response, {
           ok: true,
           data: await getReminderRuntimeStatus(runtime),
           meta: createMeta(requestId, correlationId),
@@ -1161,7 +1163,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             ...(correlationId ? { correlationId } : {}),
           },
         );
-        sendResult(response, result.body, result.statusCode);
+        sendResult(request, response, result.body, result.statusCode);
       }
       return;
     }
@@ -1170,5 +1172,5 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
       statusCode: 404,
       ...(correlationId ? { correlationId } : {}),
     });
-    sendResult(response, result.body, result.statusCode);
+    sendResult(request, response, result.body, result.statusCode);
   });
