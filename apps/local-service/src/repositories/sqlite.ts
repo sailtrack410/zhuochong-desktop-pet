@@ -3,6 +3,7 @@ import type { ChatSessionStatsDto } from "@zhuochong/ui-contracts";
 import BetterSqlite3 from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { encryptApiKey } from "../config/api-key-crypto.js";
 
 import { createPrefixedId, nowIso } from "@zhuochong/shared";
 
@@ -180,7 +181,9 @@ const normalizeSettingsPatch = (
   };
   const apiKeyEncrypted = modelPatch?.clearApiKey
     ? undefined
-    : modelPatch?.apiKeyInput ?? current.model.apiKeyEncrypted;
+    : modelPatch?.apiKeyInput
+      ? encryptApiKey(modelPatch.apiKeyInput)
+      : current.model.apiKeyEncrypted;
   const model =
     apiKeyEncrypted === undefined
       ? nextModel
