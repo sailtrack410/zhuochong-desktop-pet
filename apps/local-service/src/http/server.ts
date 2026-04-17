@@ -64,8 +64,18 @@ import {
 import type { LocalServiceRuntime } from "../application/runtime.js";
 import type { ConversationMessage, PetStateSnapshotRecord } from "../domain/models.js";
 
-const applyCorsHeaders = (response: ServerResponse) => {
-  response.setHeader("Access-Control-Allow-Origin", "*");
+const allowedOrigins = [
+  "http://127.0.0.1:3765",
+  "http://localhost:3765",
+  "http://127.0.0.1:5173",
+  "http://localhost:5173",
+];
+
+const applyCorsHeaders = (request: IncomingMessage, response: ServerResponse) => {
+  const origin = request.headers.origin ?? "";
+  if (allowedOrigins.includes(origin) || !origin) {
+    response.setHeader("Access-Control-Allow-Origin", origin || allowedOrigins[0]!);
+  }
   response.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, X-Request-Id, X-Correlation-Id",
@@ -100,7 +110,7 @@ const sendJson = (
   statusCode: number,
   payload: unknown,
 ): void => {
-  applyCorsHeaders(response);
+  applyCorsHeaders(request, response);
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
   });
@@ -108,7 +118,7 @@ const sendJson = (
 };
 
 const sendSseHeaders = (response: ServerResponse) => {
-  applyCorsHeaders(response);
+  applyCorsHeaders(request, response);
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -164,7 +174,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
     if (method === "OPTIONS") {
-      applyCorsHeaders(response);
+      applyCorsHeaders(request, response);
       response.writeHead(204);
       response.end();
       return;
@@ -536,7 +546,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           sessionId?: unknown;
         };
         if (typeof body.sessionId !== "string" || body.sessionId.trim().length === 0) {
-          applyCorsHeaders(response);
+          applyCorsHeaders(request, response);
           response.writeHead(400, {
             "Content-Type": "application/json; charset=utf-8",
           });
