@@ -181,22 +181,34 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
     }
 
     if (method === "GET" && url.pathname === "/health") {
-      sendJson(response, 200, {
-        ok: true,
-        service: "local-service",
-        storage: runtime.storage,
-        issuedAt: nowIso(),
-      });
+      try {
+        sendJson(response, 200, {
+          ok: true,
+          service: "local-service",
+          storage: runtime.storage,
+          issuedAt: nowIso(),
+        });
+      } catch {
+        sendJson(response, 500, { ok: false, service: "local-service" });
+      }
       return;
     }
 
     if (method === "GET" && url.pathname === "/settings/get") {
-      const settings = await runtime.repositories.settingsRepository.get();
-      sendResult<SettingsDto>(response, {
-        ok: true,
-        data: mapSettingsToDto(settings),
-        meta: createMeta(requestId, correlationId),
-      });
+      try {
+        const settings = await runtime.repositories.settingsRepository.get();
+        sendResult<SettingsDto>(response, {
+          ok: true,
+          data: mapSettingsToDto(settings),
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId, "INTERNAL_ERROR", "读取设置失败。",
+          { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
       return;
     }
 
@@ -246,12 +258,20 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
     }
 
     if (method === "GET" && url.pathname === "/chat/session/active") {
-      const session = await runtime.repositories.conversationRepository.getOrCreateActiveSession();
-      sendResult<ChatSessionDto>(response, {
-        ok: true,
-        data: mapConversationSessionToDto(session),
-        meta: createMeta(requestId, correlationId),
-      });
+      try {
+        const session = await runtime.repositories.conversationRepository.getOrCreateActiveSession();
+        sendResult<ChatSessionDto>(response, {
+          ok: true,
+          data: mapConversationSessionToDto(session),
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId, "INTERNAL_ERROR", "获取活动会话失败。",
+          { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
       return;
     }
 
@@ -604,14 +624,22 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
     }
 
     if (method === "GET" && url.pathname === "/pet/state") {
-      const latestSnapshot = await runtime.repositories.petStateRepository.getLatest();
-      sendResult<PetStateSnapshot>(response, {
-        ok: true,
-        data: latestSnapshot
-          ? mapPetStateRecordToDto(latestSnapshot)
-          : createDefaultPetStateSnapshot(),
-        meta: createMeta(requestId, correlationId),
-      });
+      try {
+        const latestSnapshot = await runtime.repositories.petStateRepository.getLatest();
+        sendResult<PetStateSnapshot>(response, {
+          ok: true,
+          data: latestSnapshot
+            ? mapPetStateRecordToDto(latestSnapshot)
+            : createDefaultPetStateSnapshot(),
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId, "INTERNAL_ERROR", "获取桌宠状态失败。",
+          { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
       return;
     }
 
@@ -669,12 +697,20 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
     }
 
     if (method === "GET" && url.pathname === "/system/context") {
-      const settings = await runtime.repositories.settingsRepository.get();
-      sendResult<SystemContextDto>(response, {
-        ok: true,
-        data: createDefaultSystemContextDto(settings),
-        meta: createMeta(requestId, correlationId),
-      });
+      try {
+        const settings = await runtime.repositories.settingsRepository.get();
+        sendResult<SystemContextDto>(response, {
+          ok: true,
+          data: createDefaultSystemContextDto(settings),
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId, "INTERNAL_ERROR", "获取系统上下文失败。",
+          { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
       return;
     }
 
@@ -823,23 +859,31 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
         return;
       }
 
-      const memories = await runtime.repositories.memoryRepository.listRelevantForChat({
-        limit: parsed.data.limit ?? 50,
-        ...(parsed.data.category ? { categories: [parsed.data.category] } : {}),
-      });
+      try {
+        const memories = await runtime.repositories.memoryRepository.listRelevantForChat({
+          limit: parsed.data.limit ?? 50,
+          ...(parsed.data.category ? { categories: [parsed.data.category] } : {}),
+        });
 
-      const memoryDtos = memories
-        .filter((m) => m.status === "active")
-        .map(mapMemoryRecordToDto);
+        const memoryDtos = memories
+          .filter((m) => m.status === "active")
+          .map(mapMemoryRecordToDto);
 
-      sendResult<MemoryListDto>(response, {
-        ok: true,
-        data: {
-          memories: memoryDtos,
-          total: memoryDtos.length,
-        },
-        meta: createMeta(requestId, correlationId),
-      });
+        sendResult<MemoryListDto>(response, {
+          ok: true,
+          data: {
+            memories: memoryDtos,
+            total: memoryDtos.length,
+          },
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId, "INTERNAL_ERROR", "获取记忆列表失败。",
+          { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
       return;
     }
 
@@ -867,17 +911,25 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
         return;
       }
 
-      const entries = await runtime.repositories.diaryRepository.listRecent(
-        parsed.data.limit ?? 7,
-      );
+      try {
+        const entries = await runtime.repositories.diaryRepository.listRecent(
+          parsed.data.limit ?? 7,
+        );
 
-      sendResult<DiaryListDto>(response, {
-        ok: true,
-        data: {
-          entries: entries.map(mapDiaryEntryToDto),
-        },
-        meta: createMeta(requestId, correlationId),
-      });
+        sendResult<DiaryListDto>(response, {
+          ok: true,
+          data: {
+            entries: entries.map(mapDiaryEntryToDto),
+          },
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId, "INTERNAL_ERROR", "获取日记列表失败。",
+          { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
       return;
     }
 
@@ -905,13 +957,21 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
         return;
       }
 
-      const entry = await runtime.repositories.diaryRepository.getByDate(parsed.data.date);
+      try {
+        const entry = await runtime.repositories.diaryRepository.getByDate(parsed.data.date);
 
-      sendResult<DiaryEntryDto | null>(response, {
-        ok: true,
-        data: entry ? mapDiaryEntryToDto(entry) : null,
-        meta: createMeta(requestId, correlationId),
-      });
+        sendResult<DiaryEntryDto | null>(response, {
+          ok: true,
+          data: entry ? mapDiaryEntryToDto(entry) : null,
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId, "INTERNAL_ERROR", "获取日记失败。",
+          { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
       return;
     }
 
@@ -1059,20 +1119,28 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
         return;
       }
 
-      const records = await runtime.repositories.reminderLogRepository.listRecent({
-        limit: parsed.data.limit ?? 50,
-        ...(parsed.data.since ? { since: parsed.data.since } : {}),
-      });
-      const reminders = records.map(mapReminderRecordToDto);
+      try {
+        const records = await runtime.repositories.reminderLogRepository.listRecent({
+          limit: parsed.data.limit ?? 50,
+          ...(parsed.data.since ? { since: parsed.data.since } : {}),
+        });
+        const reminders = records.map(mapReminderRecordToDto);
 
-      sendResult<ReminderListDto>(response, {
-        ok: true,
-        data: {
-          reminders,
-          total: reminders.length,
-        },
-        meta: createMeta(requestId, correlationId),
-      });
+        sendResult<ReminderListDto>(response, {
+          ok: true,
+          data: {
+            reminders,
+            total: reminders.length,
+          },
+          meta: createMeta(requestId, correlationId),
+        });
+      } catch {
+        const result = failure(
+          requestId, "INTERNAL_ERROR", "获取提醒列表失败。",
+          { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
+        );
+        sendResult(response, result.body, result.statusCode);
+      }
       return;
     }
 
