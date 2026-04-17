@@ -2794,9 +2794,17 @@ const startManagedLocalService = () => {
   localServiceProcess = spawn(process.execPath, [localServiceEntry], {
     cwd: getRuntimeWorkingDirectory(),
     env: {
-      ...process.env,
+      NODE_ENV: process.env.NODE_ENV ?? "production",
+      HOME: process.env.HOME,
+      PATH: process.env.PATH,
+      LANG: process.env.LANG,
       ELECTRON_RUN_AS_NODE: "1",
       APP_PORT: process.env.APP_PORT ?? "3765",
+      APP_STORAGE_MODE: process.env.APP_STORAGE_MODE,
+      APP_DATABASE_FILE: process.env.APP_DATABASE_FILE,
+      ZHUOCHONG_MODEL_BASE_URL: process.env.ZHUOCHONG_MODEL_BASE_URL,
+      ZHUOCHONG_MODEL_API_KEY: process.env.ZHUOCHONG_MODEL_API_KEY,
+      ZHUOCHONG_MODEL_NAME: process.env.ZHUOCHONG_MODEL_NAME,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -2811,8 +2819,14 @@ const startManagedLocalService = () => {
     if (code && signal !== "SIGTERM") {
       // eslint-disable-next-line no-console
       console.error(
-        `[local-service] exited unexpectedly with code=${code}, signal=${signal ?? "none"}.`,
+        `[local-service] exited unexpectedly with code=${code}, signal=${signal ?? "none"}. Restarting in 3s...`,
       );
+
+      localServiceProcess = null;
+      setTimeout(() => {
+        startManagedLocalService();
+      }, 3000);
+      return;
     }
 
     localServiceProcess = null;
@@ -3570,18 +3584,21 @@ const registerIpcHandlers = () => {
 
     // 获取电池状态
     try {
-      const batteryLevel = process.platform === "darwin" 
-        ? require("child_process").execSync("pmset -g batt | grep -oE '[0-9]+%' | tr -d '%'", { encoding: "utf8" }).trim()
-        : null;
-      const isCharging = process.platform === "darwin"
-        ? require("child_process").execSync("pmset -g batt | grep -oE '(charging|discharging|charged)'", { encoding: "utf8" }).trim() !== "discharging"
-        : false;
-      
-      if (batteryLevel) {
-        systemInfo.battery = {
-          isCharging,
-          level: parseInt(batteryLevel, 10),
-        };
+      if (process.platform === "darwin") {
+        const { execFile: execFileAsync } = require("node:child_process");
+        const battOutput = await new Promise<string>((resolve, reject) => {
+          execFileAsync("bash", ["-c", "pmset -g batt"], { encoding: "utf8", timeout: 3000 }, (err: Error | null, stdout: string) => {
+            if (err) reject(err); else resolve(stdout);
+          });
+        });
+        const levelMatch = battOutput.match(/(\d+)%/);
+        const stateMatch = battOutput.match(/(charging|discharging|charged)/);
+        if (levelMatch) {
+          systemInfo.battery = {
+            isCharging: stateMatch ? stateMatch[1] !== "discharging" : false,
+            level: parseInt(levelMatch[1]!, 10),
+          };
+        }
       }
     } catch {
       // 忽略错误

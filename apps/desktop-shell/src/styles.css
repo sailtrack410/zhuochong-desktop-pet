@@ -330,7 +330,17 @@ textarea {
 
 }
 
-
+.sidebar-offline-badge {
+  margin-bottom: 12px;
+  padding: 3px 0;
+  width: 32px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--color-error, #ef4444);
+  border-radius: 4px;
+}
 
 .sidebar-nav {
 
