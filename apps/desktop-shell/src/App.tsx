@@ -1,12 +1,15 @@
 import {
+  Component,
   useEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
+  type ErrorInfo,
   type FormEvent,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 
 import type {
@@ -3374,8 +3377,72 @@ const MainApp = ({
 export const App = () => {
   const presentationMode = getPresentationMode();
   if (presentationMode === "clipboard") {
-    return <ClipboardPalette />;
+    return (
+      <AppErrorBoundary>
+        <ClipboardPalette />
+      </AppErrorBoundary>
+    );
   }
 
-  return <MainApp presentationMode={presentationMode} />;
+  return (
+    <AppErrorBoundary>
+      <MainApp presentationMode={presentationMode} />
+    </AppErrorBoundary>
+  );
 };
+
+type ErrorBoundaryProps = { children: ReactNode };
+type ErrorBoundaryState = { hasError: boolean; error: Error | null };
+
+class AppErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("[AppErrorBoundary] 渲染异常:", error, info.componentStack);
+  }
+
+  render() {
+    if (!this.state.hasError) {
+      return this.props.children;
+    }
+
+    return (
+      <div style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100vh",
+        padding: 32,
+        fontFamily: "system-ui, sans-serif",
+        color: "#333",
+        background: "#fafafa",
+        textAlign: "center",
+      }}>
+        <div style={{ fontSize: 40, marginBottom: 16 }}>😵</div>
+        <h2 style={{ margin: "0 0 8px", fontSize: 18 }}>界面出了点问题</h2>
+        <p style={{ margin: "0 0 16px", color: "#666", fontSize: 14 }}>
+          {this.state.error?.message ?? "发生了未知错误"}
+        </p>
+        <button
+          type="button"
+          onClick={() => this.setState({ hasError: false, error: null })}
+          style={{
+            padding: "8px 24px",
+            borderRadius: 8,
+            border: "1px solid #ddd",
+            background: "#fff",
+            cursor: "pointer",
+            fontSize: 14,
+          }}
+        >
+          重试
+        </button>
+      </div>
+    );
+  }
+}
