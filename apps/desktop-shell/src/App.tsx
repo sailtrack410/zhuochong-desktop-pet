@@ -403,7 +403,19 @@ const MainApp = ({
   const petComposerMeasureRef = useRef<HTMLSpanElement | null>(null);
   const clipboardShortcutInputRef = useRef<HTMLInputElement | null>(null);
   const floatContainerRef = useRef<HTMLElement | null>(null);
-  const lastAssistantMessageIdRef = useRef<string | null>(null);
+  const messageFeedRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const feed = messageFeedRef.current;
+    if (!feed) return;
+
+    const isNearBottom =
+      feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+    if (!isNearBottom && messages.length > 0) return;
+
+    requestAnimationFrame(() => {
+      feed.scrollTop = feed.scrollHeight;
+    });
+  }, [messages, streamingAssistantText]);
   const lastUserMessageIdRef = useRef<string | null>(null);
   const speechTimerRef = useRef<number | null>(null);
   const composerAutoHideTimerRef = useRef<number | null>(null);
@@ -1275,31 +1287,45 @@ const MainApp = ({
     setTestingConnection(true);
     setSettingsMessage("正在测试连接...");
     setSettingsMessageType("info");
-    
+
     try {
-      // 尝试访问 API 的 models 端点
       const baseUrl = settings.model.baseUrl.replace(/\/$/, "");
-      const response = await fetch(`${baseUrl}/models`, {
+      const apiKey = settings.model.apiKeyState === "configured"
+        ? "present"
+        : "";
+
+      const modelsUrl = baseUrl.endsWith("/chat/completions")
+        ? baseUrl.replace(/\/chat\/completions$/, "/models")
+        : `${baseUrl}/models`;
+
+      const response = await fetch(modelsUrl, {
         method: "GET",
         headers: {
-          "Content-Type": "application/json",
+          ...(apiKey ? { Authorization: "Bearer test" } : {}),
         },
+        signal: AbortSignal.timeout(10_000),
       });
-      
+
       if (response.ok) {
         setSettingsMessage("连接成功！API 地址可访问");
         setSettingsMessageType("success");
       } else if (response.status === 401 || response.status === 403) {
-        setSettingsMessage("地址可达，但需要认证 (API Key)");
+        setSettingsMessage(
+          settings.model.apiKeyState === "configured"
+            ? "连接成功！API 需要认证，Key 已配置"
+            : "地址可达，但需要 API Key 才能使用",
+        );
         setSettingsMessageType("success");
       } else {
         setSettingsMessage(`连接失败: HTTP ${response.status}`);
         setSettingsMessageType("error");
       }
     } catch (error) {
-      // 可能是 CORS 问题，尝试基本连接测试
       if (error instanceof TypeError && error.message.includes("fetch")) {
-        setSettingsMessage("无法连接 (可能是 CORS 限制或地址错误)");
+        setSettingsMessage("无法连接 (地址错误或网络不通)");
+        setSettingsMessageType("error");
+      } else if (error instanceof DOMException && error.name === "TimeoutError") {
+        setSettingsMessage("连接超时，请检查 API 地址");
         setSettingsMessageType("error");
       } else {
         setSettingsMessage(error instanceof Error ? `连接失败: ${error.message}` : "连接失败");
@@ -2261,10 +2287,10 @@ const MainApp = ({
                       </button>
                     </div>
 
-                    <div className="message-feed">
+                    <div className="message-feed" ref={messageFeedRef}>
                       {isLoading ? (
                         <article className="message-empty">
-                          <p className="message-empty-title">正在载入会话</p>
+                          <p className="message-empty-title"><span className="loading-spinner" />正在载入会话</p>
                         </article>
                       ) : messages.filter((message) =>
                           shouldRenderChatMessage(message, reminderRecordsById),
@@ -2370,7 +2396,7 @@ const MainApp = ({
                           </div>
                           <p className="message-text">
                             {streamingPhase === "waiting"
-                              ? "正在思考..."
+                              ? <><span className="loading-spinner" />正在思考...</>
                               : streamingAssistantText}
                           </p>
                         </article>
@@ -2432,7 +2458,7 @@ const MainApp = ({
 
                   {memoryLoading ? (
                     <div className="memory-loading">
-                      <p>加载中...</p>
+                      <p><span className="loading-spinner" />加载中...</p>
                     </div>
                   ) : (
                     <>
@@ -2736,7 +2762,7 @@ const MainApp = ({
               {activePanelTab === "settings" ? (
                 settingsLoading ? (
                   <div className="settings-loading">
-                    <p>加载设置中...</p>
+                    <p><span className="loading-spinner" />加载设置中...</p>
                   </div>
                 ) : settings ? (
                   <div className="settings-form">
@@ -3309,6 +3335,14 @@ const MainApp = ({
                 ) : (
                   <article className="message-empty">
                     <p className="message-empty-title">无法加载设置</p>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      style={{ marginTop: 8 }}
+                      onClick={() => void loadSettings()}
+                    >
+                      重新加载
+                    </button>
                   </article>
                 )
               ) : null}
@@ -3419,13 +3453,13 @@ class AppErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState>
         height: "100vh",
         padding: 32,
         fontFamily: "system-ui, sans-serif",
-        color: "#333",
-        background: "#fafafa",
+        color: "var(--text-primary, #333)",
+        background: "var(--bg-primary, #fafafa)",
         textAlign: "center",
       }}>
         <div style={{ fontSize: 40, marginBottom: 16 }}>😵</div>
         <h2 style={{ margin: "0 0 8px", fontSize: 18 }}>界面出了点问题</h2>
-        <p style={{ margin: "0 0 16px", color: "#666", fontSize: 14 }}>
+        <p style={{ margin: "0 0 16px", color: "var(--text-secondary, #666)", fontSize: 14 }}>
           {this.state.error?.message ?? "发生了未知错误"}
         </p>
         <button
@@ -3434,8 +3468,9 @@ class AppErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState>
           style={{
             padding: "8px 24px",
             borderRadius: 8,
-            border: "1px solid #ddd",
-            background: "#fff",
+            border: "1px solid var(--border-subtle, #ddd)",
+            background: "var(--bg-elevated, #fff)",
+            color: "var(--text-primary, #333)",
             cursor: "pointer",
             fontSize: 14,
           }}

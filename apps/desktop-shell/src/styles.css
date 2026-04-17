@@ -1779,6 +1779,22 @@ textarea {
 
 }
 
+.loading-spinner {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--accent-primary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 
 
 .message-meta {
@@ -3367,13 +3383,13 @@ textarea {
 
   padding: 0;
 
-  border: 1px solid rgba(60, 60, 80, 0.3);
+  border: 1px solid var(--border-subtle, rgba(60, 60, 80, 0.3));
 
   border-radius: 8px;
 
-  background: rgba(20, 20, 30, 0.92);
+  background: var(--bg-elevated, rgba(20, 20, 30, 0.92));
 
-  color: #e8e8f0;
+  color: var(--text-primary, #e8e8f0);
 
   transform: none !important;
 
@@ -3407,7 +3423,7 @@ textarea {
 
 .float-container .pet-speech-text {
   display: block;
-  color: #e8e8f0;
+  color: var(--text-primary, #e8e8f0);
   font-size: 13px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -3424,33 +3440,33 @@ textarea {
   width: 220px;
   display: block;
   padding: 10px 14px;
-  border: 1px solid rgba(60, 60, 80, 0.4);
+  border: 1px solid var(--border-subtle, rgba(60, 60, 80, 0.4));
   border-radius: 6px;
-  background: rgba(30, 30, 45, 0.95) !important;
+  background: var(--bg-elevated, rgba(30, 30, 45, 0.95)) !important;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
 .float-container .pet-inline-composer:focus-within {
-  background: rgba(40, 40, 55, 0.98) !important;
-  border-color: rgba(100, 100, 140, 0.5);
+  background: var(--bg-elevated, rgba(40, 40, 55, 0.98)) !important;
+  border-color: var(--accent-primary, rgba(100, 100, 140, 0.5));
 }
 
 .float-container .pet-inline-input {
   min-height: 32px;
   max-height: 80px;
-  color: #e8e8f0 !important;
+  color: var(--text-primary, #e8e8f0) !important;
   font-size: 13px;
   background: transparent !important;
-  caret-color: #a0a0ff;
+  caret-color: var(--accent-primary, #a0a0ff);
 }
 
 .float-container .pet-inline-input:focus {
   background: transparent !important;
-  color: #e8e8f0 !important;
+  color: var(--text-primary, #e8e8f0) !important;
 }
 
 .float-container .pet-inline-input::placeholder {
-  color: rgba(200, 200, 220, 0.5);
+  color: var(--text-tertiary, rgba(200, 200, 220, 0.5));
 }
 
 .pet-speech-bubble {
