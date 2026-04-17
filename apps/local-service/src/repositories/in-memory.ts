@@ -1,6 +1,7 @@
 import type { ChatSessionStatsDto } from "@zhuochong/ui-contracts";
 import { createPrefixedId, nowIso, toDateKey } from "@zhuochong/shared";
 
+import { isFixedCanonicalMemoryKey } from "../application/companion-memory.js";
 import { defaultSettings } from "../config/default-settings.js";
 import type {
   AppSettings,
@@ -21,6 +22,27 @@ import type {
   ReminderLogRepository,
   SettingsRepository,
 } from "./contracts.js";
+
+const normalizeMemoryText = (value: string) =>
+  value.replace(/[\s，,。！？!?：:；;]+/g, "").trim();
+
+const isSameMemoryValue = (left: string, right: string) =>
+  normalizeMemoryText(left) === normalizeMemoryText(right);
+
+const mergeConfirmedMemory = (
+  existingRecord: MemoryRecord,
+  incomingRecord: MemoryRecord,
+): MemoryRecord => ({
+  ...incomingRecord,
+  memoryId: existingRecord.memoryId,
+  firstObservedAt: existingRecord.firstObservedAt,
+  sourceMessageId: incomingRecord.sourceMessageId ?? existingRecord.sourceMessageId,
+  confidence: Math.max(existingRecord.confidence, incomingRecord.confidence),
+  lastConfirmedAt:
+    existingRecord.lastConfirmedAt.localeCompare(incomingRecord.lastConfirmedAt) > 0
+      ? existingRecord.lastConfirmedAt
+      : incomingRecord.lastConfirmedAt,
+});
 
 const sortByNewest = <T extends { createdAt?: string; triggeredAt?: string; generatedAt?: string }>(
   records: T[],
@@ -283,12 +305,27 @@ export class InMemoryMemoryRepository implements MemoryRepository {
         return record;
       }
 
+      if (isFixedCanonicalMemoryKey(record.key)) {
+        this.records[activeMatchIndex] = {
+          ...record,
+          memoryId: existingRecord.memoryId,
+          firstObservedAt: existingRecord.firstObservedAt,
+        };
+        return this.records[activeMatchIndex]!;
+      }
+
+      if (isSameMemoryValue(existingRecord.valueText, record.valueText)) {
+        const mergedRecord = mergeConfirmedMemory(existingRecord, record);
+        this.records[activeMatchIndex] = mergedRecord;
+        return mergedRecord;
+      }
+
       this.records[activeMatchIndex] = {
-        ...record,
-        memoryId: existingRecord.memoryId,
-        firstObservedAt: existingRecord.firstObservedAt,
+        ...existingRecord,
+        status: "superseded",
       };
-      return this.records[activeMatchIndex]!;
+      this.records.push(record);
+      return record;
     }
 
     this.records.push(record);

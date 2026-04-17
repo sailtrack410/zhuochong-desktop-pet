@@ -306,6 +306,28 @@ export const rememberExplicitMemory = async (
   );
 };
 
+const fixedCanonicalMemoryKeys = new Set([
+  "最近照料",
+  "最近随机事件",
+  "最近聊天",
+  "当前关系阶段",
+  "最近关系变化",
+  "关系气质",
+  "累计投喂次数",
+  "累计玩耍次数",
+  "累计休息照料次数",
+  "累计正向聊天次数",
+  "累计负向聊天次数",
+  "累计正向事件次数",
+  "累计波动事件次数",
+  "最近偏好",
+  "近期状态倾向",
+  "交流印象",
+]);
+
+export const isFixedCanonicalMemoryKey = (key: string) =>
+  fixedCanonicalMemoryKeys.has(key);
+
 const getProfileToneLead = (petName: string, stage: string) => {
   if (stage === "亲密无间") {
     return `${petName} 已经把你划进最熟悉的领地里，很多小反应都会优先朝你这边偏。`;
