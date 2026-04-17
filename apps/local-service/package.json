@@ -10,7 +10,7 @@
     "start": "node dist/apps/local-service/src/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/main.ts",
-    "postinstall": "node ../../node_modules/@electron/rebuild/lib/cli.js -m . -o better-sqlite3 2>/dev/null || echo '[local-service] better-sqlite3 rebuild skipped (electron not found)'"
+    "postinstall": "cd node_modules/.pnpm/better-sqlite3@12.8.0/node_modules/better-sqlite3 2>/dev/null && npx --yes node-gyp rebuild --runtime=electron --target=33.4.11 --dist-url=https://electronjs.org/headers 2>/dev/null || echo '[local-service] better-sqlite3 electron rebuild skipped'"
   },
   "dependencies": {
     "@zhuochong/shared": "workspace:*",
