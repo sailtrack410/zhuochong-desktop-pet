@@ -4,6 +4,7 @@ import type { ChatAppendMessageResponse } from "@zhuochong/ui-contracts";
 import { mapConversationMessageToDto, mapConversationSessionToDto } from "./mappers.js";
 import type { LocalServiceRuntime } from "./runtime.js";
 import { buildChatMemoryContext } from "./companion-memory.js";
+import { decryptApiKey } from "../config/api-key-crypto.js";
 import type { AppSettings, ConversationMessage } from "../domain/models.js";
 
 const recentHistoryLimit = 12;
@@ -40,7 +41,8 @@ const resolveModelEndpoint = (baseUrl: string) => {
 const resolveModelConfig = (settings: AppSettings) => {
   const baseUrl = resolveModelEndpoint(settings.model.baseUrl);
   const modelName = settings.model.modelName.trim();
-  const apiKey = settings.model.apiKeyEncrypted?.trim() ?? "";
+  const rawApiKey = settings.model.apiKeyEncrypted?.trim() ?? "";
+  const apiKey = rawApiKey ? decryptApiKey(rawApiKey) || rawApiKey : "";
 
   if (!baseUrl) {
     throw new Error("模型 base URL 未配置。");

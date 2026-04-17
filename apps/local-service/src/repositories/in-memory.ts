@@ -2,6 +2,7 @@ import type { ChatSessionStatsDto } from "@zhuochong/ui-contracts";
 import { createPrefixedId, nowIso, toDateKey } from "@zhuochong/shared";
 
 import { isFixedCanonicalMemoryKey } from "../application/companion-memory.js";
+import { encryptApiKey } from "../config/api-key-crypto.js";
 import { defaultSettings } from "../config/default-settings.js";
 import type {
   AppSettings,
@@ -267,7 +268,9 @@ export class InMemorySettingsRepository implements SettingsRepository {
     };
     const apiKeyEncrypted = modelPatch?.clearApiKey
       ? undefined
-      : modelPatch?.apiKeyInput ?? current.model.apiKeyEncrypted;
+      : modelPatch?.apiKeyInput
+        ? encryptApiKey(modelPatch.apiKeyInput)
+        : current.model.apiKeyEncrypted;
     const model =
       apiKeyEncrypted === undefined
         ? nextModel

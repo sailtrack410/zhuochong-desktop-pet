@@ -1,6 +1,7 @@
 import { nowIso } from "@zhuochong/shared";
 
 import type { AppSettings } from "../domain/models.js";
+import { encryptApiKey } from "./api-key-crypto.js";
 
 const resolveEnvValue = (...keys: string[]) => {
   for (const key of keys) {
@@ -23,9 +24,8 @@ export const defaultSettings = (): AppSettings => ({
       "OPENAI_API_KEY",
     )
       ? {
-          apiKeyEncrypted: resolveEnvValue(
-            "ZHUOCHONG_MODEL_API_KEY",
-            "OPENAI_API_KEY",
+          apiKeyEncrypted: encryptApiKey(
+            resolveEnvValue("ZHUOCHONG_MODEL_API_KEY", "OPENAI_API_KEY"),
           ),
         }
       : {}),
