@@ -2111,6 +2111,36 @@ textarea {
 
 }
 
+.quick-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 18px 0;
+}
+
+.quick-prompt-chip {
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--console-divider);
+  background: var(--console-surface);
+  color: var(--console-text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.quick-prompt-chip:hover {
+  background: var(--console-surface-strong);
+  color: var(--console-text);
+  border-color: var(--console-sidebar-border);
+}
+
+.quick-prompt-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 
 
 .composer-input {
