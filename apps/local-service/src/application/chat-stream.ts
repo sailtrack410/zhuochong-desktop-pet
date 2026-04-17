@@ -11,6 +11,8 @@ const upstreamFirstTokenTimeoutMs = 12_000;
 const upstreamRequestTimeoutMs = 35_000;
 const upstreamFallbackTimeoutMs = 20_000;
 const upstreamMaxTokens = 180;
+const maxRetryAttempts = 2;
+const retryBaseDelayMs = 800;
 
 type ChatStreamEvent =
   | {
@@ -181,6 +183,56 @@ const requestUpstream = async (params: {
   throw new Error(parseUpstreamError(parsedError) || errorText);
 };
 
+const isRetryableError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  if (error.name === "AbortError" || error.name === "TimeoutError") {
+    return false;
+  }
+
+  const message = error.message;
+  if (/4\d{2}/.test(message)) {
+    return false;
+  }
+
+  return true;
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const requestUpstreamWithRetry = async (params: {
+  apiKey: string;
+  baseUrl: string;
+  body: Record<string, unknown>;
+  signal?: AbortSignal;
+}): Promise<Response> => {
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= maxRetryAttempts; attempt++) {
+    if (params.signal?.aborted) {
+      throw params.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+    }
+
+    try {
+      return await requestUpstream(params);
+    } catch (error) {
+      lastError = error;
+
+      if (attempt < maxRetryAttempts && isRetryableError(error)) {
+        const delay = retryBaseDelayMs * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError;
+};
+
 const extractDeltaText = (payload: unknown): string => {
   if (!payload || typeof payload !== "object" || !("choices" in payload)) {
     return "";
@@ -269,7 +321,7 @@ const requestFallbackReply = async (params: {
   }>;
 }) => {
   const fallbackSignal = AbortSignal.timeout(upstreamFallbackTimeoutMs);
-  const response = await requestUpstream({
+  const response = await requestUpstreamWithRetry({
     apiKey: params.apiKey,
     baseUrl: params.baseUrl,
     signal: fallbackSignal,
@@ -347,7 +399,7 @@ export async function* streamAssistantReply(
   }, upstreamFirstTokenTimeoutMs);
 
   try {
-    const upstreamResponse = await requestUpstream({
+    const upstreamResponse = await requestUpstreamWithRetry({
       apiKey: modelConfig.apiKey,
       baseUrl: modelConfig.baseUrl,
       signal: streamController.signal,
