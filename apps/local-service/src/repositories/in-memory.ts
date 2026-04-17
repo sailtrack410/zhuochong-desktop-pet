@@ -44,6 +44,15 @@ const mergeConfirmedMemory = (
       : incomingRecord.lastConfirmedAt,
 });
 
+const maxMessages = 2_000;
+const maxSessions = 50;
+const maxMemoryRecords = 500;
+const maxPetStateSnapshots = 200;
+const maxReminderRecords = 200;
+
+const trimArrayToSize = <T>(array: T[], maxSize: number): T[] =>
+  array.length > maxSize ? array.slice(-maxSize) : array;
+
 const sortByNewest = <T extends { createdAt?: string; triggeredAt?: string; generatedAt?: string }>(
   records: T[],
 ): T[] =>
@@ -87,6 +96,9 @@ export class InMemoryConversationRepository implements ConversationRepository {
 
   async appendMessage(message: ConversationMessage): Promise<void> {
     this.messages.push(message);
+    if (this.messages.length > maxMessages) {
+      this.messages.splice(0, this.messages.length - maxMessages);
+    }
   }
 
   async listMessages(params: {
@@ -148,6 +160,19 @@ export class InMemoryConversationRepository implements ConversationRepository {
     const session = this.createSession("active");
     this.sessions.set(session.sessionId, session);
     this.activeSessionId = session.sessionId;
+
+    if (this.sessions.size > maxSessions) {
+      const archivedEntries = [...this.sessions.entries()]
+        .filter(([, s]) => s.status === "archived")
+        .sort(([, a], [, b]) => a.lastMessageAt.localeCompare(b.lastMessageAt));
+      for (const [id] of archivedEntries) {
+        if (this.sessions.size <= maxSessions) break;
+        if (id !== this.activeSessionId) {
+          this.sessions.delete(id);
+        }
+      }
+    }
+
     return session;
   }
 
@@ -325,11 +350,30 @@ export class InMemoryMemoryRepository implements MemoryRepository {
         status: "superseded",
       };
       this.records.push(record);
+      this.compactMemoryRecords();
       return record;
     }
 
     this.records.push(record);
+    this.compactMemoryRecords();
     return record;
+  }
+
+  private compactMemoryRecords() {
+    if (this.records.length <= maxMemoryRecords) return;
+    const superseded = this.records
+      .map((r, i) => ({ record: r, index: i }))
+      .filter((e) => e.record.status === "superseded")
+      .sort((a, b) => a.record.lastConfirmedAt.localeCompare(b.record.lastConfirmedAt));
+
+    for (const { index } of superseded) {
+      if (this.records.length <= maxMemoryRecords) break;
+      this.records.splice(index, 1);
+    }
+
+    if (this.records.length > maxMemoryRecords) {
+      this.records.splice(0, this.records.length - maxMemoryRecords);
+    }
   }
 
   async findActiveByKey(params: {
@@ -390,6 +434,9 @@ export class InMemoryPetStateRepository implements PetStateRepository {
 
   async appendSnapshot(snapshot: PetStateSnapshotRecord): Promise<void> {
     this.snapshots.push(snapshot);
+    if (this.snapshots.length > maxPetStateSnapshots) {
+      this.snapshots.splice(0, this.snapshots.length - maxPetStateSnapshots);
+    }
   }
 
   async getLatest(): Promise<PetStateSnapshotRecord | null> {
@@ -406,6 +453,9 @@ export class InMemoryReminderLogRepository implements ReminderLogRepository {
 
   async append(record: ReminderRecord): Promise<void> {
     this.records.push(record);
+    if (this.records.length > maxReminderRecords) {
+      this.records.splice(0, this.records.length - maxReminderRecords);
+    }
   }
 
   async acknowledge(params: {
