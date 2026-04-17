@@ -37,7 +37,11 @@ const mergeConfirmedMemory = (
   ...incomingRecord,
   memoryId: existingRecord.memoryId,
   firstObservedAt: existingRecord.firstObservedAt,
-  sourceMessageId: incomingRecord.sourceMessageId ?? existingRecord.sourceMessageId,
+  ...(incomingRecord.sourceMessageId
+    ? { sourceMessageId: incomingRecord.sourceMessageId }
+    : existingRecord.sourceMessageId
+      ? { sourceMessageId: existingRecord.sourceMessageId }
+      : {}),
   confidence: Math.max(existingRecord.confidence, incomingRecord.confidence),
   lastConfirmedAt:
     existingRecord.lastConfirmedAt.localeCompare(incomingRecord.lastConfirmedAt) > 0
