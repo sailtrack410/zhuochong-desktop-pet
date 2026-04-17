@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/apps/local-service/src/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dev": "tsx watch src/main.ts"
+    "dev": "tsx watch src/main.ts",
+    "postinstall": "node ../../node_modules/@electron/rebuild/lib/cli.js -m . -o better-sqlite3 2>/dev/null || echo '[local-service] better-sqlite3 rebuild skipped (electron not found)'"
   },
   "dependencies": {
     "@zhuochong/shared": "workspace:*",
