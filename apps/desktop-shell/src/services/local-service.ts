@@ -157,6 +157,13 @@ const getBridge = () => window.zhuochong?.localService;
 const getLocalServiceBaseUrl = () =>
   window.zhuochong?.localService.baseUrl ?? "http://127.0.0.1:3765";
 const localStreamTimeoutMs = 45_000;
+const localRequestTimeoutMs = 15_000;
+
+const fetchWithTimeout = (url: string, init?: RequestInit): Promise<Response> =>
+  fetch(url, {
+    ...init,
+    signal: init?.signal ?? AbortSignal.timeout(localRequestTimeoutMs),
+  });
 
 const getErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : "local-service 未响应。";
@@ -390,7 +397,7 @@ export const desktopLocalService = {
   },
 
   async createNewSession(): Promise<ChatSessionDto> {
-    const response = await fetch(`${getLocalServiceBaseUrl()}/chat/session/new`, {
+    const response = await fetchWithTimeout(`${getLocalServiceBaseUrl()}/chat/session/new`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -412,7 +419,7 @@ export const desktopLocalService = {
     const params = new URLSearchParams({
       limit: String(limit),
     });
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${getLocalServiceBaseUrl()}/chat/sessions?${params.toString()}`,
     );
 
@@ -431,7 +438,7 @@ export const desktopLocalService = {
     request: ChatSessionSwitchRequest | { sessionId: string },
   ): Promise<ChatSessionDto> {
     const payload = chatSessionSwitchRequestSchema.parse(request);
-    const response = await fetch(`${getLocalServiceBaseUrl()}/chat/session/switch`, {
+    const response = await fetchWithTimeout(`${getLocalServiceBaseUrl()}/chat/session/switch`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -456,7 +463,7 @@ export const desktopLocalService = {
 
   async getSessionStats(sessionId: string): Promise<ChatSessionStatsDto> {
     const params = new URLSearchParams({ sessionId });
-    const response = await fetch(`${getLocalServiceBaseUrl()}/chat/session/stats?${params.toString()}`);
+    const response = await fetchWithTimeout(`${getLocalServiceBaseUrl()}/chat/session/stats?${params.toString()}`);
 
     if (!response.ok) {
       await unwrapErrorContractMessage(
@@ -618,7 +625,7 @@ export const desktopLocalService = {
   async updateSettings(request: SettingsUpdateRequest): Promise<SettingsDto> {
     const payload = settingsUpdateRequestSchema.parse(request);
 
-    const response = await fetch(`${getLocalServiceBaseUrl()}/settings/update`, {
+    const response = await fetchWithTimeout(`${getLocalServiceBaseUrl()}/settings/update`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -650,7 +657,7 @@ export const desktopLocalService = {
     request: ExplicitMemoryRememberRequest,
   ): Promise<ExplicitMemoryRememberResponse> {
     const payload = explicitMemoryRememberRequestSchema.parse(request);
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${getLocalServiceBaseUrl()}/memory/remember`,
       {
         method: "POST",
@@ -680,7 +687,7 @@ export const desktopLocalService = {
     request: CompanionEventRecordRequest,
   ): Promise<CompanionEventRecordResponse> {
     const payload = companionEventRecordRequestSchema.parse(request);
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${getLocalServiceBaseUrl()}/memory/companion-event`,
       {
         method: "POST",
@@ -707,7 +714,7 @@ export const desktopLocalService = {
   },
 
   async getCompanionProfileSummary(): Promise<CompanionProfileSummaryDto> {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${getLocalServiceBaseUrl()}/memory/profile-summary`,
     );
     if (!response.ok) {
@@ -740,7 +747,7 @@ export const desktopLocalService = {
     }
 
     const url = `${getLocalServiceBaseUrl()}/memory/list?${params.toString()}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) {
       await unwrapErrorContractMessage(
         response,
@@ -768,7 +775,7 @@ export const desktopLocalService = {
     }
 
     const url = `${getLocalServiceBaseUrl()}/diary/list?${params.toString()}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) {
       await unwrapErrorContractMessage(
         response,
@@ -795,7 +802,7 @@ export const desktopLocalService = {
     });
 
     const url = `${getLocalServiceBaseUrl()}/diary/get?${params.toString()}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) {
       await unwrapErrorContractMessage(
         response,
@@ -826,7 +833,7 @@ export const desktopLocalService = {
     }
 
     const url = `${getLocalServiceBaseUrl()}/reminder/list?${params.toString()}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) {
       throw new Error("获取提醒列表失败。");
     }
@@ -848,7 +855,7 @@ export const desktopLocalService = {
       );
     }
 
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${getLocalServiceBaseUrl()}/reminder/runtime-status`,
     );
     if (!response.ok) {
@@ -866,7 +873,7 @@ export const desktopLocalService = {
     request: ReminderCreateRequest,
   ): Promise<ReminderCreateResponse> {
     const payload = reminderCreateRequestSchema.parse(request);
-    const response = await fetch(`${getLocalServiceBaseUrl()}/reminder/create`, {
+    const response = await fetchWithTimeout(`${getLocalServiceBaseUrl()}/reminder/create`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -898,7 +905,7 @@ export const desktopLocalService = {
       );
     }
 
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${getLocalServiceBaseUrl()}/reminder/acknowledge`,
       {
         method: "POST",
