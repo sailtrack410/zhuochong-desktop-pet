@@ -48,6 +48,10 @@ const resolveModelConfig = (settings: AppSettings) => {
     throw new Error("模型 base URL 未配置。");
   }
 
+  if (baseUrl.startsWith("http://") && !baseUrl.startsWith("http://127.0.0.1") && !baseUrl.startsWith("http://localhost")) {
+    throw new Error("模型 base URL 必须使用 HTTPS，当前为 HTTP，API Key 会被明文传输。");
+  }
+
   if (!modelName) {
     throw new Error("模型名称未配置。");
   }

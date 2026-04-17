@@ -6,15 +6,15 @@ import {
   globalShortcut,
   ipcMain,
   Menu,
-  Notification,
-  Tray,
   nativeImage,
   nativeTheme,
   screen,
+  session,
   systemPreferences,
+  Notification,
+  Tray,
 } from "electron";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -312,7 +312,7 @@ const getDesktopShellStateFilePath = () =>
 
 const getDesktopRuntimeStateFilePath = () =>
   process.env.ZHUOCHONG_RUNTIME_STATE_FILE ??
-  join(tmpdir(), "zhuochong-desktop-runtime-state.json");
+  join(app.getPath("userData"), "zhuochong-desktop-runtime-state.json");
 
 const createClipboardItemId = () =>
   `clip_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;

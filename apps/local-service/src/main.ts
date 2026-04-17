@@ -21,6 +21,7 @@ const boot = async () => {
   const shutdown = () => {
     reminderScheduler.stop();
     server.close();
+    runtime.close();
   };
 
   process.once("SIGTERM", shutdown);

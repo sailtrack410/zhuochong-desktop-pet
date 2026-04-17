@@ -17,6 +17,7 @@ export type LocalServiceStorageInfo =
 export type LocalServiceRuntime = {
   repositories: LocalServiceRepositories;
   storage: LocalServiceStorageInfo;
+  close: () => void;
 };
 
 type SqliteModule = typeof import("../repositories/sqlite.js");
@@ -44,6 +45,7 @@ export const createLocalServiceRuntime = async (): Promise<LocalServiceRuntime> 
         mode: "memory",
         reason: "APP_STORAGE_MODE=memory",
       },
+      close: () => {},
     };
   }
 
@@ -53,15 +55,17 @@ export const createLocalServiceRuntime = async (): Promise<LocalServiceRuntime> 
       resolveLocalServiceDatabaseFilePath,
     } = await loadSqliteModule();
     const databaseFilePath = resolveLocalServiceDatabaseFilePath();
+    const repos = createSqliteRepositories({
+      databaseFilePath,
+    });
 
     return {
-      repositories: createSqliteRepositories({
-        databaseFilePath,
-      }),
+      repositories: repos,
       storage: {
         mode: "sqlite",
         databaseFilePath,
       },
+      close: () => repos.close(),
     };
   } catch (error) {
     if (process.env.APP_STORAGE_MODE?.trim().toLowerCase() === "sqlite") {
@@ -71,8 +75,6 @@ export const createLocalServiceRuntime = async (): Promise<LocalServiceRuntime> 
     const reason =
       error instanceof Error ? error.message : "Unknown sqlite initialization failure.";
 
-    // SQLite is the default path, but dev environments still need a usable fallback.
-    // When callers explicitly require sqlite, the branch above keeps the failure visible.
     return {
       repositories: createInMemoryRepositories(),
       storage: {
@@ -80,6 +82,7 @@ export const createLocalServiceRuntime = async (): Promise<LocalServiceRuntime> 
         fallbackFrom: "sqlite",
         reason,
       },
+      close: () => {},
     };
   }
 };
