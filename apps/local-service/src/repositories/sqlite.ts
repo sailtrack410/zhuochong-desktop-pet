@@ -1280,7 +1280,7 @@ export const resolveLocalServiceDatabaseFilePath = (): string => {
 
 export const createSqliteRepositories = (
   options: SqliteRepositoryOptions,
-): LocalServiceRepositories => {
+): LocalServiceRepositories & { close: () => void } => {
   const database = createDatabase(options.databaseFilePath);
 
   return {
@@ -1290,5 +1290,6 @@ export const createSqliteRepositories = (
     diaryRepository: new SqliteDiaryRepository(database),
     petStateRepository: new SqlitePetStateRepository(database),
     reminderLogRepository: new SqliteReminderLogRepository(database),
+    close: () => { try { database.close(); } catch { /* already closed */ } },
   };
 };

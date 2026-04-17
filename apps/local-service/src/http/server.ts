@@ -190,8 +190,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           storage: runtime.storage,
           issuedAt: nowIso(),
         });
-      } catch {
-        sendJson(request, response, 500, { ok: false, service: "local-service" });
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        sendJson(request, response, 500, { ok: false, service: "local-service" });
       }
       return;
     }
@@ -204,8 +204,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           data: mapSettingsToDto(settings),
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId, "INTERNAL_ERROR", "读取设置失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
@@ -244,8 +244,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           data: mapSettingsToDto(nextSettings),
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId,
           "INTERNAL_ERROR",
           "settings/update 处理失败。",
@@ -267,8 +267,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           data: mapConversationSessionToDto(session),
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId, "INTERNAL_ERROR", "获取活动会话失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
@@ -348,8 +348,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           data: mapConversationSessionToDto(session),
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId,
           "INTERNAL_ERROR",
           "切换活动会话失败。",
@@ -547,8 +547,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           },
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId,
           "INTERNAL_ERROR",
           "chat/messages/append 处理失败。",
@@ -635,8 +635,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
             : createDefaultPetStateSnapshot(),
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId, "INTERNAL_ERROR", "获取桌宠状态失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
@@ -683,8 +683,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           data: mapPetStateRecordToDto(snapshot),
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId,
           "INTERNAL_ERROR",
           "pet/state/update 处理失败。",
@@ -706,8 +706,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           data: createDefaultSystemContextDto(settings),
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId, "INTERNAL_ERROR", "获取系统上下文失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
@@ -749,8 +749,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           },
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId,
           "INTERNAL_ERROR",
           "memory/remember 处理失败。",
@@ -798,8 +798,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           },
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId,
           "INTERNAL_ERROR",
           "memory/companion-event 处理失败。",
@@ -820,8 +820,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           data: await buildCompanionProfileSummary(runtime),
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId,
           "INTERNAL_ERROR",
           "memory/profile-summary 处理失败。",
@@ -879,8 +879,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           },
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId, "INTERNAL_ERROR", "获取记忆列表失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
@@ -925,8 +925,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           },
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId, "INTERNAL_ERROR", "获取日记列表失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
@@ -967,8 +967,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           data: entry ? mapDiaryEntryToDto(entry) : null,
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId, "INTERNAL_ERROR", "获取日记失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
@@ -1028,8 +1028,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           data: mapReminderRecordToDto(record),
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId,
           "INTERNAL_ERROR",
           "reminder/create 处理失败。",
@@ -1082,8 +1082,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           },
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId,
           "INTERNAL_ERROR",
           "reminder/acknowledge 处理失败。",
@@ -1136,8 +1136,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           },
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId, "INTERNAL_ERROR", "获取提醒列表失败。",
           { statusCode: 500, ...(correlationId ? { correlationId } : {}) },
         );
@@ -1153,8 +1153,8 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
           data: await getReminderRuntimeStatus(runtime),
           meta: createMeta(requestId, correlationId),
         });
-      } catch {
-        const result = failure(
+      } catch (error) {
+        console.error("[local-service] request handler error:", error);        const result = failure(
           requestId,
           "INTERNAL_ERROR",
           "reminder/runtime-status 处理失败。",
