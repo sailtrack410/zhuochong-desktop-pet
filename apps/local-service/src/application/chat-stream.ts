@@ -83,7 +83,20 @@ const supportsEnableThinking = (modelName: string) =>
 
 const getAffinityStageDescription = (
   history: ConversationMessage[],
+  memoryContext: string | null,
 ) => {
+  if (memoryContext) {
+    if (memoryContext.includes("亲密无间")) {
+      return "你和用户已经非常亲密，可以放心撒娇、耍赖、表现占有欲。";
+    }
+    if (memoryContext.includes("关系很好")) {
+      return "你和用户关系已经很好，语气可以更亲近自然，像老朋友一样。";
+    }
+    if (memoryContext.includes("逐渐熟悉")) {
+      return "你和用户正在逐渐熟悉，语气自然温和，可以适度主动关心。";
+    }
+  }
+
   const userMessages = history.filter((message) => message.role === "user").length;
 
   if (userMessages >= 30) {
@@ -97,9 +110,18 @@ const getAffinityStageDescription = (
   return "你和用户还在建立联系，语气要克制、礼貌、轻柔，不要过分黏人。";
 };
 
+const getAffinityDescription = (affinity: number) => {
+  if (affinity >= 80) return "非常亲密，可以撒娇耍赖";
+  if (affinity >= 60) return "关系很好，比较亲近";
+  if (affinity >= 40) return "正在熟悉中，有些亲近感";
+  if (affinity >= 20) return "刚建立联系，还有些拘谨";
+  return "还在观察，对你保持警惕";
+};
+
 const createSystemPrompt = (
   settings: AppSettings,
   affinityStageDescription: string,
+  affinity?: number,
 ) =>
   [
     `你是 ${settings.pet.displayName}，一只运行在 mac 上的桌面宠物。`,
@@ -110,6 +132,9 @@ const createSystemPrompt = (
     "直接回答用户问题，不要描述自己正在输出、摇尾巴、打字或冒气泡。",
     "如果用户问设计或开发问题，可以给清晰直接的建议，但保持像桌宠在说话。",
     "不要输出 markdown 标题，不要自称大语言模型。",
+    ...(affinity !== undefined
+      ? [`你当前的好感度是 ${affinity}/100（${getAffinityDescription(affinity)}）。用户问好感度时如实回答这个数值，但用桌宠的方式表达感受。`]
+      : ["你无法获知好感度等精确数值，如果用户问，只描述你对这段关系的感受。"]),
   ].join("");
 
 const normalizeContent = (value: unknown): string => {
@@ -360,6 +385,7 @@ export async function* streamAssistantReply(
   runtime: LocalServiceRuntime,
   params: {
     sessionId: string;
+    affinity?: number;
   },
 ): AsyncGenerator<ChatStreamEvent> {
   const session = await runtime.repositories.conversationRepository.getOrCreateActiveSession();
@@ -375,21 +401,17 @@ export async function* streamAssistantReply(
   });
   const memoryContext = await buildChatMemoryContext(runtime);
 
-  const affinityStageDescription = getAffinityStageDescription(history);
+  const affinityStageDescription = getAffinityStageDescription(history, memoryContext);
 
+  const systemParts = [
+    createSystemPrompt(settings, affinityStageDescription, params.affinity),
+    ...(memoryContext ? [memoryContext] : []),
+  ];
   const upstreamMessages = [
     {
       role: "system",
-      content: createSystemPrompt(settings, affinityStageDescription),
+      content: systemParts.join("\n"),
     },
-    ...(memoryContext
-      ? [
-          {
-            role: "system",
-            content: memoryContext,
-          },
-        ]
-      : []),
     ...history.map((message) => ({
       role: message.role,
       content: message.text,

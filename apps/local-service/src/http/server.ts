@@ -566,6 +566,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
       try {
         const body = (await readJsonBody(request)) as {
           sessionId?: unknown;
+          affinity?: unknown;
         };
         if (typeof body.sessionId !== "string" || body.sessionId.trim().length === 0) {
           applyCorsHeaders(request, response);
@@ -594,6 +595,7 @@ export const createLocalServiceHttpServer = (runtime: LocalServiceRuntime) =>
 
         for await (const event of streamAssistantReply(runtime, {
           sessionId: body.sessionId,
+          ...(typeof body.affinity === "number" ? { affinity: body.affinity } : {}),
         })) {
           if (event.type === "delta") {
             writeSseEvent(response, {
